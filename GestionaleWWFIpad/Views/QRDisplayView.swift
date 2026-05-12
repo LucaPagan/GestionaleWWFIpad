@@ -39,7 +39,7 @@ struct QRDisplayView: View {
                     Text(poi.name)
                         .font(.title3)
                         .fontWeight(.bold)
-                    Text(poi.type.rawValue)
+                    Text(poi.type.displayName)
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Text(poi.qrPayload)

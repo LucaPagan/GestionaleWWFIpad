@@ -23,7 +23,7 @@ struct POIEditorView: View {
 
     @State private var name: String = ""
     @State private var description: String = ""
-    @State private var type: POIType = .generic
+    @State private var type: POIType = .landmark
     @State private var selectedPhoto: PhotosPickerItem? = nil
     @State private var photoData: Data? = nil
     @State private var showDeleteConfirm = false
@@ -62,7 +62,7 @@ struct POIEditorView: View {
                 Section("Tipo di punto") {
                     Picker("Tipo", selection: $type) {
                         ForEach(POIType.allCases, id: \.self) { t in
-                            Label(t.rawValue, systemImage: t.icon).tag(t)
+                            Label(t.displayName, systemImage: t.icon).tag(t)
                         }
                     }
                     .pickerStyle(.menu)
@@ -170,6 +170,7 @@ struct POIEditorView: View {
         switch mode {
         case .create(let x, let y):
             let poi = POI(name: name, description: description, x: x, y: y, type: type, photoData: photoData, isStartPoint: isStartPoint)
+            poi.needsSync = true
             onSave(poi)
         case .edit(let poi):
             poi.name = name
@@ -177,6 +178,8 @@ struct POIEditorView: View {
             poi.type = type
             poi.photoData = photoData
             poi.isStartPoint = isStartPoint
+            poi.needsSync = true
+            poi.updatedAt = Date()
             onSave(poi)
         }
     }

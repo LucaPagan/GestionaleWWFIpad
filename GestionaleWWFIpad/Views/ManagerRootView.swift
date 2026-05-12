@@ -20,11 +20,6 @@ struct ManagerRootView: View {
                 }
                 .tag(0)
 
-            TrailBuilderListView()
-                .tabItem {
-                    Label("Percorsi", systemImage: "signpost.right.and.left.fill")
-                }
-                .tag(1)
 
             EventBuilderListView()
                 .tabItem {

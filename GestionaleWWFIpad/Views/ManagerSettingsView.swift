@@ -1,15 +1,16 @@
 //
 //  ManagerSettingsView.swift
-//  WWFChallenge7
+//  GestionaleWWFIpad
 //
 //  Created by Luca Pagano on 06/05/26.
+//  Updated: Sync status, Supabase Auth integration
 //
-
 
 import SwiftUI
 
 struct ManagerSettingsView: View {
     @EnvironmentObject var managerSession: ManagerSession
+    @EnvironmentObject var syncManager: SyncManager
     @State private var showLogoutConfirm = false
 
     var body: some View {
@@ -23,16 +24,56 @@ struct ManagerSettingsView: View {
                         VStack(alignment: .leading) {
                             Text("Gestore WWF")
                                 .fontWeight(.semibold)
-                            Text("gestore@wwf.it")
+                            Text(managerSession.adminEmail ?? "Offline")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                     }
                 }
 
+                // MARK: Sync Status
+                Section("Sincronizzazione") {
+                    HStack {
+                        syncStatusIcon
+                        VStack(alignment: .leading, spacing: 2) {
+                            syncStatusText
+                            if let lastSync = syncManager.lastSyncDate {
+                                Text("Ultimo sync: \(lastSync, format: .dateTime)")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+
+                    if syncManager.pendingChanges > 0 {
+                        HStack {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .foregroundColor(.orange)
+                            Text("\(syncManager.pendingChanges) modifiche in attesa")
+                                .font(.caption)
+                        }
+                    }
+
+                    Button {
+                        Task { await syncManager.pushAllChanges() }
+                    } label: {
+                        Label("Sincronizza ora", systemImage: "arrow.triangle.2.circlepath.circle.fill")
+                            .foregroundColor(Color("WWFGreen"))
+                    }
+                    .disabled(syncManager.syncState == .syncing(entity: ""))
+
+                    Button {
+                        Task { await syncManager.pullLatestData() }
+                    } label: {
+                        Label("Aggiorna dati dal server", systemImage: "arrow.down.circle.fill")
+                            .foregroundColor(Color("WWFGreen"))
+                    }
+                }
+
                 Section("App") {
-                    LabeledContent("Versione", value: "1.0.0 (prototipo)")
+                    LabeledContent("Versione", value: "1.0.0")
                     LabeledContent("Oasi", value: "Astroni, Napoli")
+                    LabeledContent("Backend", value: "Supabase (eu-central-1)")
                 }
 
                 Section {
@@ -54,6 +95,46 @@ struct ManagerSettingsView: View {
                 }
                 Button("Annulla", role: .cancel) {}
             }
+        }
+    }
+
+    // MARK: - Sync Status Helpers
+
+    @ViewBuilder
+    private var syncStatusIcon: some View {
+        switch syncManager.syncState {
+        case .idle:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+        case .syncing:
+            ProgressView()
+        case .success:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundColor(.green)
+        case .error:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.red)
+        }
+    }
+
+    @ViewBuilder
+    private var syncStatusText: some View {
+        switch syncManager.syncState {
+        case .idle:
+            Text("Sincronizzato")
+                .font(.subheadline)
+        case .syncing(let entity):
+            Text("Sincronizzazione \(entity)...")
+                .font(.subheadline)
+                .foregroundColor(.orange)
+        case .success(let count):
+            Text("\(count) elementi sincronizzati")
+                .font(.subheadline)
+                .foregroundColor(.green)
+        case .error(let message):
+            Text("Errore: \(message)")
+                .font(.subheadline)
+                .foregroundColor(.red)
         }
     }
 }

@@ -1,48 +1,43 @@
-//
-//  TrailBuilderListView.swift
-//  WWFChallenge7
-//
-//  Created by Luca Pagano on 06/05/26.
-//
-
-
 import SwiftUI
 import SwiftData
 
 struct TrailBuilderListView: View {
     @Environment(\.modelContext) private var context
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var syncManager: SyncManager
     @Query private var trails: [Trail]
-    @State private var showCreateSheet = false
-    @State private var selectedTrail: Trail? = nil
+    
+    var onEdit: (Trail) -> Void
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach(trails) { trail in
-                    TrailManagerRow(trail: trail)
-                        .contentShape(Rectangle())
-                        .onTapGesture { selectedTrail = trail }
+                if trails.isEmpty {
+                    Text("Nessun percorso creato.")
+                        .foregroundColor(.secondary)
+                        .italic()
+                } else {
+                    ForEach(trails) { trail in
+                        TrailManagerRow(trail: trail)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                onEdit(trail)
+                            }
+                    }
+                    .onDelete(perform: deleteTrails)
                 }
-                .onDelete(perform: deleteTrails)
             }
             .navigationTitle("Percorsi")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        showCreateSheet = true
-                    } label: {
-                        Image(systemName: "plus")
+                    Button("Chiudi") {
+                        dismiss()
                     }
                 }
                 ToolbarItem(placement: .navigationBarLeading) {
                     EditButton()
                 }
-            }
-            .sheet(isPresented: $showCreateSheet) {
-                TrailBuilderView(trail: nil)
-            }
-            .sheet(item: $selectedTrail) { trail in
-                TrailBuilderView(trail: trail)
             }
         }
     }
@@ -52,6 +47,9 @@ struct TrailBuilderListView: View {
             context.delete(trails[i])
         }
         try? context.save()
+        Task {
+            await syncManager.pushAllChanges()
+        }
     }
 }
 
@@ -73,13 +71,13 @@ struct TrailManagerRow: View {
                             .clipShape(Capsule())
                     }
                 }
-                Text("\(trail.steps.count) tappe · \(trail.estimatedMinutes) min · \(trail.difficulty.rawValue)")
+                Text("\(trail.steps.count) tappe · \(trail.estimatedMinutes ?? 0) min · \(trail.difficulty?.displayName ?? "N/D")")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             Spacer()
-            Image(systemName: "chevron.right")
-                .foregroundColor(.secondary)
+            Image(systemName: "pencil")
+                .foregroundColor(.blue)
         }
     }
 }

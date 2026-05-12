@@ -1,8 +1,9 @@
 //
 //  EventBuilderView.swift
-//  WWFChallenge7
+//  GestionaleWWFIpad
 //
 //  Created by Luca Pagano on 06/05/26.
+//  Refactored to use new model layer mirroring Supabase schema.
 //
 
 import SwiftUI
@@ -14,10 +15,11 @@ struct EventBuilderView: View {
     @Environment(\.dismiss) private var dismiss
     @Query private var allPOIs: [POI]
     @Query private var allTrails: [Trail]
+    @EnvironmentObject private var syncManager: SyncManager
 
     @State private var name = ""
     @State private var description = ""
-    @State private var category: EventCategory = .generic
+    @State private var category: EventCategory = .other
     @State private var isActive = false
     @State private var eventDate = Date()
     @State private var startTime = Date()
@@ -26,8 +28,8 @@ struct EventBuilderView: View {
     @State private var organizerName = ""
     @State private var contactInfo = ""
     @State private var requirements = ""
-    @State private var targetAudience = "Tutti"
-    @State private var price = "Gratuito"
+    @State private var targetAudience: EventAudience = .all
+    @State private var price: Double = 0
     @State private var selectedTrail: Trail? = nil
     @State private var selectedPOI: POI? = nil
 
@@ -69,7 +71,7 @@ struct EventBuilderView: View {
             }
             Picker("Categoria", selection: $category) {
                 ForEach(EventCategory.allCases, id: \.self) { cat in
-                    Label(cat.rawValue, systemImage: cat.icon).tag(cat)
+                    Label(cat.displayName, systemImage: cat.icon).tag(cat)
                 }
             }
         }
@@ -89,9 +91,25 @@ struct EventBuilderView: View {
             TextField("Organizzatore", text: $organizerName)
             TextField("Contatto (email o telefono)", text: $contactInfo).keyboardType(.emailAddress)
             Picker("Pubblico target", selection: $targetAudience) {
-                ForEach(["Tutti", "Famiglie", "Adulti", "Bambini 6-12", "Ragazzi 12-18", "Esperti"], id: \.self) { Text($0).tag($0) }
+                ForEach(EventAudience.allCases, id: \.self) { audience in
+                    Text(audience.displayName).tag(audience)
+                }
             }
-            TextField("Costo (es. Gratuito, €5.00)", text: $price)
+            HStack {
+                Text("Prezzo")
+                Spacer()
+                TextField("0.00", value: $price, format: .number)
+                    .keyboardType(.decimalPad)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 80)
+                Text("€")
+                    .foregroundColor(.secondary)
+            }
+            if price == 0 {
+                Text("Gratuito")
+                    .font(.caption)
+                    .foregroundColor(Color("WWFGreen"))
+            }
         }
     }
 
@@ -134,12 +152,14 @@ struct EventBuilderView: View {
                 ForEach(allTrails) { trail in Text(trail.name).tag(Optional(trail)) }
             }
             .pickerStyle(.menu).tint(Color("WWFGreen"))
-            if let trail = selectedTrail {
+            if let trail = selectedTrail, let difficulty = trail.difficulty {
                 HStack(spacing: 12) {
-                    Label(trail.difficulty.rawValue, systemImage: trail.difficulty.icon)
-                        .font(.caption).foregroundColor(Color(hex: trail.difficulty.color) ?? .green)
-                    Label("\(trail.estimatedMinutes) min", systemImage: "clock")
-                        .font(.caption).foregroundColor(.secondary)
+                    Label(difficulty.displayName, systemImage: difficulty.icon)
+                        .font(.caption).foregroundColor(Color(hex: difficulty.color) ?? .green)
+                    if let mins = trail.estimatedMinutes {
+                        Label("\(mins) min", systemImage: "clock")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
                     Label("\(trail.steps.count) tappe", systemImage: "mappin.and.ellipse")
                         .font(.caption).foregroundColor(.secondary)
                 }
@@ -159,9 +179,9 @@ struct EventBuilderView: View {
     private func loadExistingData() {
         guard let e = event else { return }
         name = e.name; description = e.eventDescription; category = e.category
-        isActive = e.isActive; eventDate = e.date; startTime = e.startTime; endTime = e.endTime
-        maxParticipants = e.maxParticipants; organizerName = e.organizerName
-        contactInfo = e.contactInfo; requirements = e.requirements
+        isActive = e.isActive; eventDate = e.date; startTime = e.timeStart; endTime = e.timeEnd
+        maxParticipants = e.maxParticipants ?? 30; organizerName = e.organizerName ?? ""
+        contactInfo = e.contactInfo ?? ""; requirements = e.requirements ?? ""
         targetAudience = e.targetAudience; price = e.price
         selectedTrail = e.trail; selectedPOI = e.eventPOI
     }
@@ -169,13 +189,23 @@ struct EventBuilderView: View {
     private func saveEvent() {
         let t = event ?? Event(name: "", description: "")
         t.name = name; t.eventDescription = description; t.category = category
-        t.isActive = isActive; t.date = eventDate; t.startTime = startTime; t.endTime = endTime
-        t.maxParticipants = maxParticipants; t.organizerName = organizerName
-        t.contactInfo = contactInfo; t.requirements = requirements
+        t.isActive = isActive; t.date = eventDate; t.timeStart = startTime; t.timeEnd = endTime
+        t.maxParticipants = maxParticipants > 0 ? maxParticipants : nil
+        t.organizerName = organizerName.isEmpty ? nil : organizerName
+        t.contactInfo = contactInfo.isEmpty ? nil : contactInfo
+        t.requirements = requirements.isEmpty ? nil : requirements
         t.targetAudience = targetAudience; t.price = price
         t.trail = selectedTrail; t.eventPOI = selectedPOI
+        t.needsSync = true
+        t.updatedAt = Date()
         if event == nil { context.insert(t) }
         try? context.save()
+
+        // Trigger background sync to push changes to Supabase
+        Task {
+            await syncManager.pushAllChanges()
+        }
+
         dismiss()
     }
 }

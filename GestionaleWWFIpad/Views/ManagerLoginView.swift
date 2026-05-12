@@ -86,19 +86,26 @@ struct ManagerLoginView: View {
                             focusedField = nil
                             managerSession.login(email: email, password: password)
                         } label: {
-                            Text("Accedi")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding()
-                                .background(
-                                    // ← validazione diretta sui binding, nessun computed property
-                                    (email.isEmpty || password.isEmpty) ? Color.gray : Color("WWFGreen")
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                            if managerSession.isLoading {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(Color.gray)
+                                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                            } else {
+                                Text("Accedi")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding()
+                                    .background(
+                                        (email.isEmpty || password.isEmpty) ? Color.gray : Color("WWFGreen")
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                            }
                         }
-                        // ← disabled separato così reagisce ai cambiamenti di stato
-                        .disabled(email.isEmpty || password.isEmpty)
+                        .disabled(email.isEmpty || password.isEmpty || managerSession.isLoading)
                     }
                     .padding(.horizontal)
 

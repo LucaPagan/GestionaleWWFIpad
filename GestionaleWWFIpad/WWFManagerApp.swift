@@ -2,12 +2,13 @@ import SwiftUI
 import SwiftData
 
 @main
-struct WWFManagerApp: App { // <-- Questo nome dipenderà da come hai chiamato il nuovo progetto Xcode
+struct WWFManagerApp: App {
     let container: ModelContainer
+    @StateObject private var syncManager = SyncManager()
+    @StateObject private var managerSession = ManagerSession()
 
     init() {
         do {
-            // Configurazione con migrazione automatica abilitata per gli stessi modelli
             let schema = Schema([Trail.self, POI.self, TrailStep.self, Event.self])
             let config = ModelConfiguration(
                 schema: schema,
@@ -16,7 +17,7 @@ struct WWFManagerApp: App { // <-- Questo nome dipenderà da come hai chiamato i
             )
             container = try ModelContainer(for: schema, configurations: config)
         } catch {
-            // Se la migrazione fallisce, cancella lo store e riparte pulito
+            // If migration fails, reset the store and start fresh
             Self.deleteStore()
             do {
                 let schema = Schema([Trail.self, POI.self, TrailStep.self, Event.self])
@@ -30,12 +31,37 @@ struct WWFManagerApp: App { // <-- Questo nome dipenderà da come hai chiamato i
 
     var body: some Scene {
         WindowGroup {
-            ManagerRootView() // <-- Parte subito col pannello manager
-                .modelContainer(container)
+            Group {
+                if managerSession.isLoggedIn {
+                    ManagerRootView()
+                } else {
+                    ManagerLoginView()
+                }
+            }
+            .modelContainer(container)
+            .environmentObject(syncManager)
+            .environmentObject(managerSession)
+            .onAppear {
+                // Configure SyncManager with the model context
+                syncManager.configure(with: container.mainContext)
+
+                // Seed local data if first launch
+                DataService.seedIfNeeded(context: container.mainContext)
+
+                // Try to restore previous session
+                managerSession.restoreSession()
+                
+                // Automatically push any pending offline changes if logged in
+                Task {
+                    if managerSession.isLoggedIn {
+                        await syncManager.pushAllChanges()
+                    }
+                }
+            }
         }
     }
 
-    // Cancella il file .store dal disco in caso di errori di migrazione
+    // Deletes the SwiftData store files from disk in case of migration errors
     private static func deleteStore() {
         let urls = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
