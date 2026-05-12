@@ -2,51 +2,46 @@
 //  Event.swift
 //  GestionaleWWFIpad
 //
-//  Mirrors Supabase table: public.events
-//  SRS Reference: Chapter 11 — Table: events
-//
 
 import Foundation
 import SwiftData
+import SwiftUI
 
-// MARK: - Event Model
-
-/// An event organized by the manager with an optional trail association.
-/// Mirrors the `events` table on Supabase with 1:1 field mapping.
 @Model
 final class Event {
-    // MARK: - Primary Key
     var id: UUID
-
-    // MARK: - Core Fields (mirror Supabase)
     var name: String
-    var eventDescription: String           // DB: description
-    var category: EventCategory            // DB: ENUM event_category
-    var date: Date                         // DB: date (DATE type)
-    var timeStart: Date                    // DB: time_start (stored as Date, only time component used)
-    var timeEnd: Date                      // DB: time_end
-    var maxParticipants: Int?              // DB: max_participants (nullable, CHECK > 0)
-    var isActive: Bool                     // DB: is_active — visibility for end users
-    var contactInfo: String?               // DB: contact_info
-    var requirements: String?              // DB: requirements
-    var targetAudience: EventAudience      // DB: ENUM event_audience
-    var price: Double                      // DB: price (DOUBLE, CHECK >= 0, 0 = gratuito)
-    var imageURL: String?                  // DB: image_url (URL to Supabase Storage)
-    var organizerName: String?             // DB: organizer_name
-    var photoData: Data?                   // Local-only: cached image data
+    var eventDescription: String
+    var categoryRawValue: String
+    var date: Date
+    var timeStart: Date
+    var timeEnd: Date
+    var maxParticipants: Int?
+    var isActive: Bool
+    var contactInfo: String?
+    var requirements: String?
+    var targetAudienceRawValue: String
+    var price: Double
+    var imageURL: String?
+    var organizerName: String?
+    var photoData: Data?
 
-    // MARK: - Relationships
-    var trail: Trail?                      // DB: path_id (FK → paths)
-    var eventPOI: POI?                     // DB: event_poi_id (FK → pois)
+    var trail: Trail?
+    var eventPOI: POI?
 
-    // MARK: - Timestamps
     var createdAt: Date
     var updatedAt: Date
-
-    // MARK: - Sync Metadata
     var needsSync: Bool
 
-    // MARK: - Initializer
+    @Transient var category: EventCategory {
+        get { EventCategory(rawValue: categoryRawValue) ?? .other }
+        set { categoryRawValue = newValue.rawValue }
+    }
+
+    @Transient var targetAudience: EventAudience {
+        get { EventAudience(rawValue: targetAudienceRawValue) ?? .all }
+        set { targetAudienceRawValue = newValue.rawValue }
+    }
 
     init(
         name: String,
@@ -68,7 +63,7 @@ final class Event {
         self.id = fixedID ?? UUID()
         self.name = name
         self.eventDescription = description
-        self.category = category
+        self.categoryRawValue = category.rawValue
         self.date = date
         self.timeStart = startTime
         self.timeEnd = endTime
@@ -77,7 +72,7 @@ final class Event {
         self.organizerName = organizerName
         self.contactInfo = contactInfo
         self.requirements = requirements
-        self.targetAudience = targetAudience
+        self.targetAudienceRawValue = targetAudience.rawValue
         self.price = price
         self.imageURL = imageURL
         self.photoData = photoData
@@ -85,8 +80,6 @@ final class Event {
         self.updatedAt = Date()
         self.needsSync = true
     }
-
-    // MARK: - Computed Properties
 
     var formattedStartTime: String {
         let fmt = DateFormatter()
@@ -119,14 +112,27 @@ final class Event {
         Calendar.current.isDateInToday(date)
     }
 
-    /// Price formatted for Italian display
     var formattedPrice: String {
         price == 0 ? "Gratuito" : String(format: "€%.2f", price)
     }
 
-    // MARK: - Supabase Mapping
+    func updateFromRemote(_ data: [String: Any]) {
+        if let n = data["name"] as? String { name = n }
+        if let d = data["description"] as? String { eventDescription = d }
+        if let cat = data["category"] as? String { categoryRawValue = cat }
+        if let active = data["is_active"] as? Bool { isActive = active }
+        maxParticipants = data["max_participants"] as? Int
+        contactInfo = data["contact_info"] as? String
+        requirements = data["requirements"] as? String
+        if let ta = data["target_audience"] as? String { targetAudienceRawValue = ta }
+        if let p = data["price"] as? Double { price = p }
+        imageURL = data["image_url"] as? String
+        organizerName = data["organizer_name"] as? String
+        needsSync = false
+    }
+}
 
-    /// Creates a dictionary for Supabase RPC `upsert_event`
+extension Event {
     func toSupabaseParams() -> [String: Any?] {
         let dateFmt = DateFormatter()
         dateFmt.dateFormat = "yyyy-MM-dd"
@@ -138,14 +144,14 @@ final class Event {
             "p_id": id.uuidString,
             "p_name": name,
             "p_description": eventDescription,
-            "p_category": category.supabaseValue,
+            "p_category": categoryRawValue,
             "p_date": dateFmt.string(from: date),
             "p_time_start": timeFmt.string(from: timeStart),
             "p_time_end": timeFmt.string(from: timeEnd),
             "p_max_participants": maxParticipants,
             "p_contact_info": contactInfo,
             "p_requirements": requirements,
-            "p_target_audience": targetAudience.supabaseValue,
+            "p_target_audience": targetAudienceRawValue,
             "p_price": price,
             "p_image_url": imageURL,
             "p_is_active": isActive,
@@ -154,31 +160,8 @@ final class Event {
             "p_organizer_name": organizerName
         ]
     }
-
-    /// Updates local model from Supabase row data
-    func updateFromRemote(_ data: [String: Any]) {
-        if let n = data["name"] as? String { name = n }
-        if let d = data["description"] as? String { eventDescription = d }
-        if let cat = data["category"] as? String {
-            category = EventCategory.fromSupabase(cat) ?? .other
-        }
-        if let active = data["is_active"] as? Bool { isActive = active }
-        maxParticipants = data["max_participants"] as? Int
-        contactInfo = data["contact_info"] as? String
-        requirements = data["requirements"] as? String
-        if let ta = data["target_audience"] as? String {
-            targetAudience = EventAudience.fromSupabase(ta) ?? .all
-        }
-        if let p = data["price"] as? Double { price = p }
-        imageURL = data["image_url"] as? String
-        organizerName = data["organizer_name"] as? String
-        needsSync = false
-    }
 }
 
-// MARK: - EventCategory Enum
-
-/// Maps to Supabase ENUM `event_category`
 enum EventCategory: String, Codable, CaseIterable {
     case educational  = "educational"
     case guidedTour   = "guided_tour"
@@ -212,15 +195,15 @@ enum EventCategory: String, Codable, CaseIterable {
         }
     }
 
-    var color: String {
+    var color: Color {
         switch self {
-        case .educational:  return "#1565C0"
-        case .guidedTour:   return "#2E7D32"
-        case .workshop:     return "#F57F17"
-        case .family:       return "#AB47BC"
-        case .photography:  return "#455A64"
-        case .scientific:   return "#00897B"
-        case .other:        return "#5C8A5C"
+        case .educational:  return WWFStyle.Colors.educational
+        case .guidedTour:   return WWFStyle.Colors.green
+        case .workshop:     return WWFStyle.Colors.workshop
+        case .family:       return WWFStyle.Colors.family
+        case .photography:  return WWFStyle.Colors.photography
+        case .scientific:   return WWFStyle.Colors.scientific
+        case .other:        return WWFStyle.Colors.other
         }
     }
 
@@ -231,9 +214,6 @@ enum EventCategory: String, Codable, CaseIterable {
     }
 }
 
-// MARK: - EventAudience Enum
-
-/// Maps to Supabase ENUM `event_audience`
 enum EventAudience: String, Codable, CaseIterable {
     case all         = "all"
     case adults      = "adults"

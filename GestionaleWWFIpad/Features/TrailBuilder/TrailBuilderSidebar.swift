@@ -167,7 +167,7 @@ struct TrailStepCard: View {
             HStack {
                 if let poi = step.poi {
                     Image(systemName: poi.type.icon)
-                        .foregroundColor(Color(hex: poi.type.color) ?? .green)
+                        .foregroundColor(poi.type.color)
                         .font(.title3)
                     Text(poi.name)
                         .fontWeight(.semibold)

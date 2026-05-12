@@ -155,7 +155,7 @@ struct EventBuilderView: View {
             if let trail = selectedTrail, let difficulty = trail.difficulty {
                 HStack(spacing: 12) {
                     Label(difficulty.displayName, systemImage: difficulty.icon)
-                        .font(.caption).foregroundColor(Color(hex: difficulty.color) ?? .green)
+                        .font(.caption).foregroundColor(difficulty.color)
                     if let mins = trail.estimatedMinutes {
                         Label("\(mins) min", systemImage: "clock")
                             .font(.caption).foregroundColor(.secondary)

@@ -2,19 +2,11 @@
 //  SyncManager.swift
 //  GestionaleWWFIpad
 //
-//  Orchestrates bidirectional sync between SwiftData (local) and Supabase (remote).
-//  Designed for offline-first: local writes always succeed, remote sync is best-effort.
-//
-//  SRS Reference: Chapter 7.4 — Persistenza Locale, Chapter 8 — Download Differenziato
-//
 
 import Foundation
 import SwiftData
 import Combine
 
-// MARK: - SyncState
-
-/// Represents the current state of a sync operation
 enum SyncState: Equatable {
     case idle
     case syncing(entity: String)
@@ -22,194 +14,160 @@ enum SyncState: Equatable {
     case error(message: String)
 }
 
-// MARK: - SyncManager
-
-/// Manages all data synchronization between SwiftData and Supabase.
-///
-/// Architecture:
-/// - Manager iPad → Supabase: Push changes (POIs, Trails, Events)
-/// - Supabase → Manager iPad: Pull latest state (on launch, on demand)
-/// - Photo uploads go to Supabase Storage
-/// - Sync is always non-blocking and reports state via `syncState`
 @MainActor
 final class SyncManager: ObservableObject {
-
-    // MARK: - Published State
 
     @Published var syncState: SyncState = .idle
     @Published var lastSyncDate: Date?
     @Published var pendingChanges: Int = 0
 
-    // MARK: - Dependencies
+    private var modelContainer: ModelContainer?
+    private let networkClient: NetworkClient
+    private let storageService: StorageService
 
-    private let supabase = SupabaseConfig.shared
-    private var modelContext: ModelContext?
-
-    // MARK: - Init
+    init(networkClient: NetworkClient = SupabaseConfig.shared, storageService: StorageService = StorageManager.shared) {
+        self.networkClient = networkClient
+        self.storageService = storageService
+    }
 
     func configure(with context: ModelContext) {
-        self.modelContext = context
+        self.modelContainer = context.container
         updatePendingCount()
     }
 
-    // MARK: - Push Operations (Local → Supabase)
-
-    /// Pushes all pending local changes to Supabase.
-    /// Called when the manager saves content and has connectivity.
     func pushAllChanges() async {
-        guard let context = modelContext else { return }
-
+        guard let container = modelContainer else { return }
+        
         do {
-            // 1. Sync POIs
-            syncState = .syncing(entity: "POI")
-            let poisDescriptor = FetchDescriptor<POI>(predicate: #Predicate { $0.needsSync == true })
-            let dirtyPOIs = (try? context.fetch(poisDescriptor)) ?? []
-
-            for poi in dirtyPOIs {
-                try await pushPOI(poi)
-            }
-
-            // 2. Sync Trails
-            syncState = .syncing(entity: "Percorsi")
-            let trailsDescriptor = FetchDescriptor<Trail>(predicate: #Predicate { $0.needsSync == true })
-            let dirtyTrails = (try? context.fetch(trailsDescriptor)) ?? []
-
-            for trail in dirtyTrails {
-                try await pushTrail(trail)
-            }
-
-            // 3. Sync Events
-            syncState = .syncing(entity: "Eventi")
-            let eventsDescriptor = FetchDescriptor<Event>(predicate: #Predicate { $0.needsSync == true })
-            let dirtyEvents = (try? context.fetch(eventsDescriptor)) ?? []
-
-            for event in dirtyEvents {
-                try await pushEvent(event)
-            }
-
-            let totalSynced = dirtyPOIs.count + dirtyTrails.count + dirtyEvents.count
-            syncState = .success(count: totalSynced)
+            syncState = .syncing(entity: "Dati in background")
+            
+            let worker = SyncWorker(modelContainer: container, networkClient: networkClient, storageService: storageService)
+            let resultCount = try await worker.performPush()
+            
+            syncState = .success(count: resultCount)
             lastSyncDate = Date()
-            try? context.save()
             updatePendingCount()
-
         } catch {
             syncState = .error(message: error.localizedDescription)
         }
     }
 
-    // MARK: - Individual Push Operations
-
-    /// Pushes a single POI to Supabase, including photo upload if needed
-    private func pushPOI(_ poi: POI) async throws {
-        // Upload photo to Storage if local data exists and no remote URL
-        if let photoData = poi.photoData, poi.photoURL == nil {
-            let path = "pois/\(poi.id.uuidString).jpg"
-            let url = try await supabase.uploadFile(
-                bucket: "media",
-                path: path,
-                data: photoData,
-                contentType: "image/jpeg"
-            )
-            poi.photoURL = url
-        }
-
-        // Upsert via RPC
-        _ = try await supabase.rpc("upsert_poi", params: poi.toSupabaseParams())
-        poi.needsSync = false
-    }
-
-    /// Pushes a Trail and its steps to Supabase
-    private func pushTrail(_ trail: Trail) async throws {
-        // 1. Upsert the trail itself
-        _ = try await supabase.rpc("upsert_path", params: trail.toSupabaseParams())
-
-        // 2. Sync all steps as a batch
-        let stepsJSON = trail.stepsToJSON()
-        let stepsParams: [String: Any?] = [
-            "p_path_id": trail.id.uuidString,
-            "p_steps": stepsJSON
-        ]
-        _ = try await supabase.rpc("sync_path_steps", params: stepsParams)
-
-        trail.needsSync = false
-    }
-
-    /// Pushes an Event to Supabase
-    private func pushEvent(_ event: Event) async throws {
-        // Upload event photo if needed
-        if let photoData = event.photoData, event.imageURL == nil {
-            let path = "events/\(event.id.uuidString).jpg"
-            let url = try await supabase.uploadFile(
-                bucket: "media",
-                path: path,
-                data: photoData,
-                contentType: "image/jpeg"
-            )
-            event.imageURL = url
-        }
-
-        _ = try await supabase.rpc("upsert_event", params: event.toSupabaseParams())
-        event.needsSync = false
-    }
-
-    // MARK: - Pull Operations (Supabase → Local)
-
-    /// Pulls all active content from Supabase and merges with local data.
-    /// Used for initial sync or refresh.
     func pullLatestData() async {
-        guard let context = modelContext else { return }
+        guard let container = modelContainer else { return }
 
         do {
             syncState = .syncing(entity: "Download dati")
+            
+            let worker = SyncWorker(modelContainer: container, networkClient: networkClient, storageService: storageService)
+            let resultCount = try await worker.performPull()
 
-            // Fetch all POIs
-            let remotePOIs = try await supabase.fetch(from: "pois", query: "select=*")
-            for poiData in remotePOIs {
-                guard let idStr = poiData["id"] as? String,
-                      let remoteId = UUID(uuidString: idStr) else { continue }
-
-                let descriptor = FetchDescriptor<POI>(predicate: #Predicate { $0.id == remoteId })
-                if let existing = (try? context.fetch(descriptor))?.first {
-                    // Only update if local version doesn't have pending changes
-                    if !existing.needsSync {
-                        existing.updateFromRemote(poiData)
-                    }
-                } else {
-                    // Create new local POI from remote data
-                    let newPOI = createPOIFromRemote(poiData)
-                    if let newPOI { context.insert(newPOI) }
-                }
-            }
-
-            // Fetch all paths
-            let remotePaths = try await supabase.fetch(from: "paths", query: "select=*")
-            for pathData in remotePaths {
-                guard let idStr = pathData["id"] as? String,
-                      let remoteId = UUID(uuidString: idStr) else { continue }
-
-                let descriptor = FetchDescriptor<Trail>(predicate: #Predicate { $0.id == remoteId })
-                if let existing = (try? context.fetch(descriptor))?.first {
-                    if !existing.needsSync {
-                        existing.updateFromRemote(pathData)
-                    }
-                } else {
-                    let newTrail = createTrailFromRemote(pathData)
-                    if let newTrail { context.insert(newTrail) }
-                }
-            }
-
-            try? context.save()
-            syncState = .success(count: remotePOIs.count + remotePaths.count)
+            syncState = .success(count: resultCount)
             lastSyncDate = Date()
-
+            updatePendingCount()
         } catch {
             syncState = .error(message: error.localizedDescription)
         }
     }
 
-    // MARK: - Factory Methods (Remote → Local)
+    func updatePendingCount() {
+        guard let container = modelContainer else {
+            pendingChanges = 0
+            return
+        }
+        let context = ModelContext(container)
+        
+        let poisDesc = FetchDescriptor<POI>(predicate: #Predicate { $0.needsSync == true })
+        let trailsDesc = FetchDescriptor<Trail>(predicate: #Predicate { $0.needsSync == true })
+        let eventsDesc = FetchDescriptor<Event>(predicate: #Predicate { $0.needsSync == true })
 
+        let pCount = (try? context.fetchCount(poisDesc)) ?? 0
+        let tCount = (try? context.fetchCount(trailsDesc)) ?? 0
+        let eCount = (try? context.fetchCount(eventsDesc)) ?? 0
+
+        pendingChanges = pCount + tCount + eCount
+    }
+}
+
+actor SyncWorker: ModelActor {
+    let modelContainer: ModelContainer
+    let modelExecutor: any ModelExecutor
+    let networkClient: NetworkClient
+    let storageService: StorageService
+    
+    init(modelContainer: ModelContainer, networkClient: NetworkClient, storageService: StorageService) {
+        self.modelContainer = modelContainer
+        self.modelExecutor = DefaultSerialModelExecutor(modelContext: ModelContext(modelContainer))
+        self.networkClient = networkClient
+        self.storageService = storageService
+    }
+
+    func performPush() async throws -> Int {
+        let dirtyPOIs = try modelContext.fetch(FetchDescriptor<POI>(predicate: #Predicate { $0.needsSync == true }))
+        for poi in dirtyPOIs {
+            if let photoData = poi.photoData, poi.photoURL == nil {
+                let url = try await storageService.uploadImage(data: photoData, path: "pois/\(poi.id.uuidString).jpg")
+                poi.photoURL = url
+            }
+            _ = try await networkClient.rpc("upsert_poi", params: poi.toSupabaseParams())
+            poi.needsSync = false
+        }
+
+        let dirtyTrails = try modelContext.fetch(FetchDescriptor<Trail>(predicate: #Predicate { $0.needsSync == true }))
+        for trail in dirtyTrails {
+            _ = try await networkClient.rpc("upsert_path", params: trail.toSupabaseParams())
+            let stepsParams: [String: Any?] = [
+                "p_path_id": trail.id.uuidString,
+                "p_steps": trail.stepsToJSON()
+            ]
+            _ = try await networkClient.rpc("sync_path_steps", params: stepsParams)
+            trail.needsSync = false
+        }
+
+        let dirtyEvents = try modelContext.fetch(FetchDescriptor<Event>(predicate: #Predicate { $0.needsSync == true }))
+        for event in dirtyEvents {
+            if let photoData = event.photoData, event.imageURL == nil {
+                let url = try await storageService.uploadImage(data: photoData, path: "events/\(event.id.uuidString).jpg")
+                event.imageURL = url
+            }
+            _ = try await networkClient.rpc("upsert_event", params: event.toSupabaseParams())
+            event.needsSync = false
+        }
+
+        try modelContext.save()
+        return dirtyPOIs.count + dirtyTrails.count + dirtyEvents.count
+    }
+
+    func performPull() async throws -> Int {
+        var downloadedCount = 0
+        
+        let remotePOIs = try await networkClient.fetch(from: "pois", query: "select=*")
+        for poiData in remotePOIs {
+            guard let idStr = poiData["id"] as? String, let remoteId = UUID(uuidString: idStr) else { continue }
+            let descriptor = FetchDescriptor<POI>(predicate: #Predicate { $0.id == remoteId })
+            if let existing = try modelContext.fetch(descriptor).first {
+                if !existing.needsSync { existing.updateFromRemote(poiData) }
+            } else {
+                if let newPOI = createPOIFromRemote(poiData) { modelContext.insert(newPOI) }
+            }
+            downloadedCount += 1
+        }
+
+        let remotePaths = try await networkClient.fetch(from: "paths", query: "select=*")
+        for pathData in remotePaths {
+            guard let idStr = pathData["id"] as? String, let remoteId = UUID(uuidString: idStr) else { continue }
+            let descriptor = FetchDescriptor<Trail>(predicate: #Predicate { $0.id == remoteId })
+            if let existing = try modelContext.fetch(descriptor).first {
+                if !existing.needsSync { existing.updateFromRemote(pathData) }
+            } else {
+                if let newTrail = createTrailFromRemote(pathData) { modelContext.insert(newTrail) }
+            }
+            downloadedCount += 1
+        }
+
+        try modelContext.save()
+        return downloadedCount
+    }
+    
     private func createPOIFromRemote(_ data: [String: Any]) -> POI? {
         guard let idStr = data["id"] as? String,
               let id = UUID(uuidString: idStr),
@@ -262,24 +220,5 @@ final class SyncManager: ObservableObject {
         )
         trail.needsSync = false
         return trail
-    }
-
-    // MARK: - Helpers
-
-    private func updatePendingCount() {
-        guard let context = modelContext else {
-            pendingChanges = 0
-            return
-        }
-
-        let poisDesc = FetchDescriptor<POI>(predicate: #Predicate { $0.needsSync == true })
-        let trailsDesc = FetchDescriptor<Trail>(predicate: #Predicate { $0.needsSync == true })
-        let eventsDesc = FetchDescriptor<Event>(predicate: #Predicate { $0.needsSync == true })
-
-        let pCount = (try? context.fetchCount(poisDesc)) ?? 0
-        let tCount = (try? context.fetchCount(trailsDesc)) ?? 0
-        let eCount = (try? context.fetchCount(eventsDesc)) ?? 0
-
-        pendingChanges = pCount + tCount + eCount
     }
 }

@@ -2,45 +2,32 @@
 //  Trail.swift
 //  GestionaleWWFIpad
 //
-//  Mirrors Supabase table: public.paths
-//  SRS Reference: Chapter 11 — Table: paths
-//
 
 import Foundation
 import SwiftData
+import SwiftUI
 
-// MARK: - Trail Model
-
-/// Represents a trail/path in the Oasi degli Astroni.
-/// Mirrors the `paths` table on Supabase with 1:1 field mapping.
-///
-/// Note: The Swift model uses "Trail" naming for iOS conventions,
-/// while Supabase uses "paths" to stay DB-neutral.
 @Model
 final class Trail {
-    // MARK: - Primary Key
     var id: UUID
-
-    // MARK: - Core Fields (mirror Supabase)
     var name: String
-    var trailDescription: String           // DB: description
-    var isActive: Bool                      // DB: is_active — visibility for end users
-    var difficulty: TrailDifficulty?        // DB: ENUM path_difficulty (nullable per SRS)
-    var estimatedMinutes: Int?             // DB: estimated_minutes (nullable per SRS, CHECK > 0)
-    var coverImageURL: String?             // DB: cover_image_url
+    var trailDescription: String
+    var isActive: Bool
+    var difficultyRawValue: String?
+    var estimatedMinutes: Int?
+    var coverImageURL: String?
 
-    // MARK: - Relationships
-    var steps: [TrailStep]                 // DB: path_steps (FK path_id)
-    var startPOIId: UUID?                  // DB: start_poi_id (FK → pois)
+    var steps: [TrailStep]
+    var startPOIId: UUID?
 
-    // MARK: - Timestamps
     var createdAt: Date
     var updatedAt: Date
-
-    // MARK: - Sync Metadata (local-only)
     var needsSync: Bool
 
-    // MARK: - Initializer
+    @Transient var difficulty: TrailDifficulty? {
+        get { difficultyRawValue.flatMap { TrailDifficulty(rawValue: $0) } }
+        set { difficultyRawValue = newValue?.rawValue }
+    }
 
     init(
         name: String,
@@ -56,7 +43,7 @@ final class Trail {
         self.name = name
         self.trailDescription = description
         self.isActive = isActive
-        self.difficulty = difficulty
+        self.difficultyRawValue = difficulty?.rawValue
         self.estimatedMinutes = estimatedMinutes
         self.coverImageURL = coverImageURL
         self.steps = []
@@ -66,14 +53,10 @@ final class Trail {
         self.needsSync = true
     }
 
-    // MARK: - Computed Properties
-
-    /// Returns steps sorted by their order index
     var sortedSteps: [TrailStep] {
         steps.sorted { $0.stepOrder < $1.stepOrder }
     }
 
-    /// Finds the current step the user needs to visit based on completed POI IDs
     func currentStep(completedPOIIds: Set<UUID>) -> TrailStep? {
         sortedSteps.first { step in
             guard let poi = step.poi else { return false }
@@ -81,23 +64,34 @@ final class Trail {
         }
     }
 
-    // MARK: - Supabase Mapping
+    func updateFromRemote(_ data: [String: Any]) {
+        if let n = data["name"] as? String { name = n }
+        if let d = data["description"] as? String { trailDescription = d }
+        if let active = data["is_active"] as? Bool { isActive = active }
+        if let diff = data["difficulty"] as? String { difficultyRawValue = diff }
+        estimatedMinutes = data["estimated_minutes"] as? Int
+        coverImageURL = data["cover_image_url"] as? String
+        if let spid = data["start_poi_id"] as? String {
+            startPOIId = UUID(uuidString: spid)
+        }
+        needsSync = false
+    }
+}
 
-    /// Creates a dictionary for Supabase RPC `upsert_path`
+extension Trail {
     func toSupabaseParams() -> [String: Any?] {
         return [
             "p_id": id.uuidString,
             "p_name": name,
             "p_description": trailDescription,
             "p_is_active": isActive,
-            "p_difficulty": difficulty?.supabaseValue,
+            "p_difficulty": difficultyRawValue,
             "p_estimated_minutes": estimatedMinutes,
             "p_cover_image_url": coverImageURL,
             "p_start_poi_id": startPOIId?.uuidString
         ]
     }
 
-    /// Creates JSONB array of steps for `sync_path_steps` RPC
     func stepsToJSON() -> [[String: Any?]] {
         sortedSteps.map { step in
             [
@@ -110,33 +104,12 @@ final class Trail {
             ]
         }
     }
-
-    /// Updates local model from Supabase row data
-    func updateFromRemote(_ data: [String: Any]) {
-        if let n = data["name"] as? String { name = n }
-        if let d = data["description"] as? String { trailDescription = d }
-        if let active = data["is_active"] as? Bool { isActive = active }
-        if let diff = data["difficulty"] as? String {
-            difficulty = TrailDifficulty.fromSupabase(diff)
-        }
-        estimatedMinutes = data["estimated_minutes"] as? Int
-        coverImageURL = data["cover_image_url"] as? String
-        if let spid = data["start_poi_id"] as? String {
-            startPOIId = UUID(uuidString: spid)
-        }
-        needsSync = false
-    }
 }
 
-// MARK: - TrailDifficulty Enum
-
-/// Maps to Supabase ENUM `path_difficulty`: easy | medium | hard
 enum TrailDifficulty: String, Codable, CaseIterable {
     case easy   = "easy"
     case medium = "medium"
     case hard   = "hard"
-
-    // MARK: - Display Properties (Italian UI)
 
     var displayName: String {
         switch self {
@@ -146,11 +119,11 @@ enum TrailDifficulty: String, Codable, CaseIterable {
         }
     }
 
-    var color: String {
+    var color: Color {
         switch self {
-        case .easy:   return "#2E7D32"
-        case .medium: return "#F57F17"
-        case .hard:   return "#C62828"
+        case .easy:   return WWFStyle.Colors.green
+        case .medium: return WWFStyle.Colors.warning
+        case .hard:   return WWFStyle.Colors.danger
         }
     }
 
@@ -161,8 +134,6 @@ enum TrailDifficulty: String, Codable, CaseIterable {
         case .hard:   return "mountain.2.fill"
         }
     }
-
-    // MARK: - Supabase Mapping
 
     var supabaseValue: String { rawValue }
 

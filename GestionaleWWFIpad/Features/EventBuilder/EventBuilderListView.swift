@@ -94,7 +94,7 @@ struct EventManagerRow: View {
     let event: Event
 
     var categoryColor: Color {
-        Color(hex: event.category.color) ?? .green
+        event.category.color
     }
 
     var body: some View {

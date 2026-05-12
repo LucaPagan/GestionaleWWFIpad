@@ -297,7 +297,7 @@ final class TrailPOIMarkerView: UIView {
         }
 
         ctx.setShadow(offset: CGSize(width: 0, height: 2 / zoomScale), blur: 4 / zoomScale, color: UIColor.black.withAlphaComponent(0.4).cgColor)
-        let fillColor = UIColor(Color(hex: poi.type.color) ?? .green)
+        let fillColor = UIColor(poi.type.color)
         ctx.setFillColor(fillColor.cgColor)
         ctx.addArc(center: CGPoint(x: circleCenterX, y: circleCenterY), radius: radius, startAngle: 0, endAngle: .pi * 2, clockwise: false)
         ctx.fillPath()

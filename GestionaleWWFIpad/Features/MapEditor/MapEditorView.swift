@@ -248,7 +248,7 @@ struct MapEditorView: View {
                     HStack(spacing: 5) {
                         Image(systemName: type.icon)
                             .font(.caption2)
-                            .foregroundColor(Color(hex: type.color) ?? .green)
+                            .foregroundColor(type.color)
                         Text(type.displayName)
                             .font(.caption2)
                             .foregroundColor(.primary)
