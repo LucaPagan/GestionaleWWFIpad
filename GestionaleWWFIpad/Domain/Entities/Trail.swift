@@ -100,7 +100,8 @@ extension Trail {
                 "step_order": step.stepOrder,
                 "direction_hint": step.directionHint,
                 "distance_meters": step.distanceMeters,
-                "estimated_minutes": step.estimatedMinutes
+                "estimated_minutes": step.estimatedMinutes,
+                "path_geometry": step.pathGeometry
             ]
         }
     }

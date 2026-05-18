@@ -8,6 +8,7 @@
 
 import Foundation
 import SwiftData
+import CoreLocation
 
 // MARK: - TrailStep Model
 
@@ -23,6 +24,7 @@ final class TrailStep {
     var directionHint: String?             // DB: direction_hint — navigation instructions
     var distanceMeters: Int?               // DB: distance_meters (CHECK > 0)
     var estimatedMinutes: Int?             // DB: estimated_minutes (CHECK > 0)
+    var pathGeometry: String?              // DB: path_geometry — encoded polyline for path tracing
 
     // MARK: - Relationships
     var poi: POI?                          // DB: poi_id (FK → pois)
@@ -37,6 +39,7 @@ final class TrailStep {
         directionHint: String? = nil,
         distanceMeters: Int? = nil,
         estimatedMinutes: Int? = nil,
+        pathGeometry: String? = nil,
         poi: POI? = nil,
         fixedID: UUID? = nil
     ) {
@@ -45,8 +48,17 @@ final class TrailStep {
         self.directionHint = directionHint
         self.distanceMeters = distanceMeters
         self.estimatedMinutes = estimatedMinutes
+        self.pathGeometry = pathGeometry
         self.poi = poi
         self.createdAt = Date()
+    }
+
+    // MARK: - Helpers
+
+    /// Decodes the path geometry into a list of coordinates for MapKit.
+    var coordinates: [CLLocationCoordinate2D] {
+        guard let pathGeometry = pathGeometry else { return [] }
+        return PolylineCodec.decode(pathGeometry)
     }
 
     // MARK: - Backward Compatibility

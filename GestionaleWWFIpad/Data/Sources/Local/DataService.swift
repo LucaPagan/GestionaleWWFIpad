@@ -73,13 +73,15 @@ class DataService {
         }
 
         // --- Trail 1: Anello Base ---
+        let fixedTrailID1 = UUID(uuidString: "B1000001-0000-0000-0000-000000000001")!
         let trail1 = Trail(
             name: "Anello Base",
             description: "Il percorso ideale per la prima visita. Attraversa i punti principali dell'oasi in circa un'ora.",
             isActive: true,
             difficulty: .easy,
             estimatedMinutes: 60,
-            startPOIId: fixedID1
+            startPOIId: fixedID1,
+            fixedID: fixedTrailID1
         )
 
         let step1 = TrailStep(stepOrder: 0, directionHint: "Parti dall'ingresso e segui il sentiero principale verso sinistra. Dopo circa 200m troverai il primo cartello.", distanceMeters: 200, estimatedMinutes: 5, poi: poi1)
@@ -93,13 +95,15 @@ class DataService {
         context.insert(trail1)
 
         // --- Trail 2: Sentiero Naturalistico ---
+        let fixedTrailID2 = UUID(uuidString: "B1000001-0000-0000-0000-000000000002")!
         let trail2 = Trail(
             name: "Sentiero Naturalistico",
             description: "Percorso approfondito per gli appassionati di natura. Guide audio disponibili offline.",
             isActive: true,
             difficulty: .medium,
             estimatedMinutes: 90,
-            startPOIId: fixedID4
+            startPOIId: fixedID4,
+            fixedID: fixedTrailID2
         )
 
         let step2a = TrailStep(stepOrder: 0, directionHint: "Dalla partenza, imbocca il sentiero di destra verso il laghetto.", distanceMeters: 250, estimatedMinutes: 7, poi: poi4)
@@ -117,6 +121,7 @@ class DataService {
             let cal = Calendar.current
 
             let tomorrow = cal.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+            let fixedEventID1 = UUID(uuidString: "C1000001-0000-0000-0000-000000000001")!
             let event1 = Event(
                 name: "Birdwatching all'Alba",
                 description: "Esplora l'avifauna dell'Oasi accompagnato da un ornitologo esperto. Binocoli forniti dall'organizzazione.",
@@ -129,7 +134,8 @@ class DataService {
                 contactInfo: "eventi@wwfcampania.it",
                 requirements: "Scarpe comode, abbigliamento mimetico, crema solare. Binocoli disponibili.",
                 targetAudience: .all,
-                price: 0
+                price: 0,
+                fixedID: fixedEventID1
             )
             event1.isActive = true
             event1.trail = trail1
@@ -138,6 +144,7 @@ class DataService {
             context.insert(event1)
 
             let inThreeDays = cal.date(byAdding: .day, value: 3, to: Date()) ?? Date()
+            let fixedEventID2 = UUID(uuidString: "C1000001-0000-0000-0000-000000000002")!
             let event2 = Event(
                 name: "Piccoli Naturalisti",
                 description: "Laboratorio interattivo per bambini: scopriamo le piante, gli insetti e gli animali dell'Oasi con giochi e attività pratiche.",
@@ -150,7 +157,8 @@ class DataService {
                 contactInfo: "edu@wwfcampania.it",
                 requirements: "Abbigliamento comodo, cappellino, merenda.",
                 targetAudience: .children,
-                price: 5.00
+                price: 5.00,
+                fixedID: fixedEventID2
             )
             event2.isActive = true
             event2.trail = trail2

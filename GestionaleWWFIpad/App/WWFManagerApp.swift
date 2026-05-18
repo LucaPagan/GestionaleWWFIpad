@@ -4,12 +4,12 @@ import SwiftData
 @main
 struct WWFManagerApp: App {
     let container: ModelContainer
-    @StateObject private var syncManager = SyncManager()
+    @StateObject private var syncManager = SyncManager.shared
     @StateObject private var managerSession = ManagerSession()
 
     init() {
         do {
-            let schema = Schema([Trail.self, POI.self, TrailStep.self, Event.self])
+            let schema = Schema([Trail.self, POI.self, TrailStep.self, Event.self, Content.self])
             let config = ModelConfiguration(
                 schema: schema,
                 isStoredInMemoryOnly: false,
@@ -20,7 +20,7 @@ struct WWFManagerApp: App {
             // If migration fails, reset the store and start fresh
             Self.deleteStore()
             do {
-                let schema = Schema([Trail.self, POI.self, TrailStep.self, Event.self])
+                let schema = Schema([Trail.self, POI.self, TrailStep.self, Event.self, Content.self])
                 let config = ModelConfiguration(schema: schema)
                 container = try ModelContainer(for: schema, configurations: config)
             } catch {

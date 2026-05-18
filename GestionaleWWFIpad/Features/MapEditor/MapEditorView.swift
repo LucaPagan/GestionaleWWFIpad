@@ -38,6 +38,10 @@ struct MapEditorView: View {
     @State private var tbSteps: [TrailDraftStep] = []
     @State private var tbSelectedStartPOI: POI? = nil
     @State private var tbIsSyncing: Bool = false
+    
+    // Path Tracing State
+    @State private var tbTracingStepId: UUID? = nil
+    @State private var tbIsTracing: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -69,6 +73,8 @@ struct MapEditorView: View {
                                     return
                                 }
                                 
+                                if tbIsTracing { return } // No adding POIs during tracing
+                                
                                 if mapMode != .defaultMode {
                                     // Aggiungi alla rotta
                                     withAnimation {
@@ -78,6 +84,15 @@ struct MapEditorView: View {
                                     // Modalità base: modifica POI
                                     selectedPOI = poi
                                     showPOIEditor = true
+                                }
+                            },
+                            isTracingMode: tbIsTracing,
+                            onPathCaptured: { encodedPath in
+                                if let stepId = tbTracingStepId,
+                                   let index = tbSteps.firstIndex(where: { $0.id == stepId }) {
+                                    tbSteps[index].pathGeometry = encodedPath
+                                    tbIsTracing = false
+                                    tbTracingStepId = nil
                                 }
                             }
                         )
@@ -148,6 +163,14 @@ struct MapEditorView: View {
         }
         // Aggiungiamo un'animazione globale quando cambia la modalità
         .animation(.easeInOut(duration: 0.3), value: mapMode)
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TriggerPathTracing"))) { note in
+            if let id = note.object as? UUID {
+                tbTracingStepId = id
+                withAnimation {
+                    tbIsTracing = true
+                }
+            }
+        }
     }
 
     // MARK: - HUD Elements
@@ -281,7 +304,8 @@ struct MapEditorView: View {
                     poi: $0.poi,
                     instructions: $0.directionHint ?? "",
                     distanceMeters: $0.distanceMeters,
-                    estimatedMinutes: $0.estimatedMinutes
+                    estimatedMinutes: $0.estimatedMinutes,
+                    pathGeometry: $0.pathGeometry
                 )
             }
         } else {
@@ -319,6 +343,7 @@ struct MapEditorView: View {
                 directionHint: draft.instructions,
                 distanceMeters: draft.distanceMeters,
                 estimatedMinutes: draft.estimatedMinutes,
+                pathGeometry: draft.pathGeometry,
                 poi: draft.poi
             )
             context.insert(s)
@@ -354,10 +379,13 @@ struct MapEditorView: View {
     }
 
     private func handleDeletePOI(_ poi: POI) {
-        context.delete(poi)
-        try? context.save()
-        showPOIEditor = false
-        selectedPOI = nil
-        pendingPosition = nil
+        Task {
+            await syncManager.delete(poi, in: context)
+            await MainActor.run {
+                showPOIEditor = false
+                selectedPOI = nil
+                pendingPosition = nil
+            }
+        }
     }
 }

@@ -11,6 +11,7 @@ import SwiftData
 struct EventBuilderListView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Event.date, order: .forward) private var events: [Event]
+    @EnvironmentObject private var syncManager: SyncManager
     @State private var showCreateSheet = false
     @State private var selectedEvent: Event? = nil
 
@@ -81,10 +82,12 @@ struct EventBuilderListView: View {
     }
 
     private func deleteEvents(from source: [Event], at offsets: IndexSet) {
-        for i in offsets {
-            context.delete(source[i])
+        let eventsToDelete = offsets.map { source[$0] }
+        Task {
+            for event in eventsToDelete {
+                await syncManager.delete(event, in: context)
+            }
         }
-        try? context.save()
     }
 }
 

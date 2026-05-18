@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import CoreLocation
 
 // MARK: - TrailInteractiveMapView
 
@@ -11,6 +12,10 @@ struct TrailInteractiveMapView: UIViewRepresentable {
     
     let onTapMap: (CGPoint) -> Void
     let onTapPOI: (POI) -> Void
+    
+    // Path Tracing
+    var isTracingMode: Bool = false
+    var onPathCaptured: (String) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -61,6 +66,24 @@ struct TrailInteractiveMapView: UIViewRepresentable {
         tap.delegate = context.coordinator
         container.addGestureRecognizer(tap)
         context.coordinator.tapGesture = tap
+        
+        let pan = UIPanGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handlePan(_:))
+        )
+        pan.delegate = context.coordinator
+        container.addGestureRecognizer(pan)
+        context.coordinator.panGesture = pan
+
+        // Tracing Layer (Active)
+        let tracingLayer = CAShapeLayer()
+        tracingLayer.strokeColor = UIColor.systemBlue.cgColor
+        tracingLayer.lineWidth = 6.0
+        tracingLayer.fillColor = nil
+        tracingLayer.lineJoin = .round
+        tracingLayer.lineCap = .round
+        container.layer.addSublayer(tracingLayer)
+        context.coordinator.tracingLayer = tracingLayer
 
         DispatchQueue.main.async {
             context.coordinator.setupLayout(in: scrollView, image: img)
@@ -72,6 +95,9 @@ struct TrailInteractiveMapView: UIViewRepresentable {
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.updateMarkersAndLines(in: scrollView)
+        
+        // Show/Hide tracing HUD
+        context.coordinator.updateTracingUI()
     }
 
     // MARK: - Coordinator
@@ -81,7 +107,12 @@ struct TrailInteractiveMapView: UIViewRepresentable {
         weak var containerView: UIView?
         weak var imageView: UIImageView?
         weak var linesLayer: CAShapeLayer?
+        weak var tracingLayer: CAShapeLayer?
         weak var tapGesture: UITapGestureRecognizer?
+        weak var panGesture: UIPanGestureRecognizer?
+        
+        private var activePathPoints: [CGPoint] = []
+        private var tracingHUD: UIView?
 
         init(_ parent: TrailInteractiveMapView) {
             self.parent = parent
@@ -122,23 +153,32 @@ struct TrailInteractiveMapView: UIViewRepresentable {
 
             let currentScale = scrollView.zoomScale
             
-            // 1. Draw Lines
-            if let linesLayer = linesLayer {
-                linesLayer.lineWidth = 4.0 / currentScale
-                let path = UIBezierPath()
+            // 1. Draw Step Paths (Complex Geometry)
+            // Clean old path layers
+            container.layer.sublayers?.filter { $0.name == "StepPath" }.forEach { $0.removeFromSuperlayer() }
+            
+            for step in parent.trailSteps {
+                guard let geom = step.pathGeometry, !geom.isEmpty else { continue }
+                let coords = PolylineCodec.decode(geom)
+                let stepPath = UIBezierPath()
+                let points = coords.map { CGPoint(x: $0.latitude * imageSize.width, y: $0.longitude * imageSize.height) }
                 
-                let stepPositions = parent.trailSteps.compactMap { step -> CGPoint? in
-                    guard let poi = step.poi else { return nil }
-                    return CGPoint(x: poi.x * imageSize.width, y: poi.y * imageSize.height)
-                }
-                
-                if !stepPositions.isEmpty {
-                    path.move(to: stepPositions[0])
-                    for i in 1..<stepPositions.count {
-                        path.addLine(to: stepPositions[i])
+                if let first = points.first {
+                    stepPath.move(to: first)
+                    for i in 1..<points.count {
+                        stepPath.addLine(to: points[i])
                     }
                 }
-                linesLayer.path = path.cgPath
+                
+                let stepLayer = CAShapeLayer()
+                stepLayer.name = "StepPath"
+                stepLayer.path = stepPath.cgPath
+                stepLayer.strokeColor = UIColor(Color("WWFGreen")).withAlphaComponent(0.8).cgColor
+                stepLayer.lineWidth = 4.0 / currentScale
+                stepLayer.fillColor = nil
+                stepLayer.lineJoin = .round
+                stepLayer.lineCap = .round
+                container.layer.insertSublayer(stepLayer, at: 1) // Below markers
             }
 
             // 2. Draw Markers
@@ -233,6 +273,116 @@ struct TrailInteractiveMapView: UIViewRepresentable {
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
             if gestureRecognizer === tapGesture, other is UIPanGestureRecognizer { return true }
             return false
+        }
+        
+        @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
+            guard parent.isTracingMode, let container = containerView, let imageView = imageView else { return }
+            
+            let location = gesture.location(in: imageView)
+            let imageSize = imageView.frame.size
+            
+            switch gesture.state {
+            case .began:
+                activePathPoints = [location]
+                tracingLayer?.path = nil
+                tracingLayer?.isHidden = false
+            case .changed:
+                // Only add point if it's far enough from the last one (lightweight)
+                if let last = activePathPoints.last {
+                    let dist = hypot(location.x - last.x, location.y - last.y)
+                    if dist > 5.0 / (parent.isTracingMode ? 2.0 : 1.0) { // Precision threshold
+                        activePathPoints.append(location)
+                        updateTracingPath()
+                    }
+                }
+            case .ended:
+                finishTracing(imageSize: imageSize)
+            default:
+                activePathPoints = []
+                tracingLayer?.path = nil
+            }
+        }
+        
+        private func updateTracingPath() {
+            let path = UIBezierPath()
+            if let first = activePathPoints.first {
+                path.move(to: first)
+                for i in 1..<activePathPoints.count {
+                    path.addLine(to: activePathPoints[i])
+                }
+            }
+            tracingLayer?.path = path.cgPath
+        }
+        
+        private func finishTracing(imageSize: CGSize) {
+            guard activePathPoints.count > 1 else { return }
+            
+            // Convert to normalized coordinates for storage
+            let coords = activePathPoints.map { pt in
+                CLLocationCoordinate2D(
+                    latitude: Double(pt.x / imageSize.width),
+                    longitude: Double(pt.y / imageSize.height)
+                )
+            }
+            
+            let encoded = PolylineCodec.encode(coords)
+            parent.onPathCaptured(encoded)
+            
+            activePathPoints = []
+            tracingLayer?.path = nil
+            tracingLayer?.isHidden = true
+        }
+        
+        func updateTracingUI() {
+            guard let container = containerView?.superview else { return }
+            
+            if parent.isTracingMode {
+                if tracingHUD == nil {
+                    let hud = createTracingHUD()
+                    container.addSubview(hud)
+                    tracingHUD = hud
+                    
+                    NSLayoutConstraint.activate([
+                        hud.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+                        hud.topAnchor.constraint(equalTo: container.topAnchor, constant: 100)
+                    ])
+                }
+                panGesture?.isEnabled = true
+                // Disable scrolling during tracing
+                if let scrollView = container as? UIScrollView {
+                    scrollView.isScrollEnabled = false
+                }
+            } else {
+                tracingHUD?.removeFromSuperview()
+                tracingHUD = nil
+                panGesture?.isEnabled = false
+                if let scrollView = container as? UIScrollView {
+                    scrollView.isScrollEnabled = true
+                }
+            }
+        }
+        
+        private func createTracingHUD() -> UIView {
+            let view = UIView()
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.9)
+            view.layer.cornerRadius = 20
+            
+            let label = UILabel()
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.text = "🎨 DISEGNA IL SENTIERO SULLA MAPPA"
+            label.textColor = .white
+            label.font = .systemFont(ofSize: 14, weight: .bold)
+            
+            view.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+                label.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+                label.topAnchor.constraint(equalTo: view.topAnchor, constant: 10),
+                label.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10)
+            ])
+            
+            return view
         }
         
         // MARK: - UIDragInteractionDelegate

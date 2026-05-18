@@ -72,7 +72,7 @@ final class POI {
         latitude = data["latitude"] as? Double
         longitude = data["longitude"] as? Double
         if let t = data["type"] as? String { typeRawValue = t }
-        photoURL = data["photo_data"] as? String
+        photoURL = data["photo_url"] as? String
         if let qr = data["qr_payload"] as? String { qrPayload = qr }
         if let sp = data["is_start_point"] as? Bool { isStartPoint = sp }
         if let active = data["is_active"] as? Bool { isActive = active }

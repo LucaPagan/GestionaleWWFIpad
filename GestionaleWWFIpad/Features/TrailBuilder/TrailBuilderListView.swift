@@ -43,12 +43,11 @@ struct TrailBuilderListView: View {
     }
 
     private func deleteTrails(at offsets: IndexSet) {
-        for i in offsets {
-            context.delete(trails[i])
-        }
-        try? context.save()
+        let trailsToDelete = offsets.map { trails[$0] }
         Task {
-            await syncManager.pushAllChanges()
+            for trail in trailsToDelete {
+                await syncManager.delete(trail, in: context)
+            }
         }
     }
 }

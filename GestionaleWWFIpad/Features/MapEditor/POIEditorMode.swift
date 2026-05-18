@@ -8,6 +8,7 @@
 
 import SwiftUI
 import PhotosUI
+import SwiftData
 
 enum POIEditorMode {
     case create(x: Double, y: Double)
@@ -20,6 +21,7 @@ struct POIEditorView: View {
     let onDelete: ((POI) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
 
     @State private var name: String = ""
     @State private var description: String = ""
@@ -29,6 +31,16 @@ struct POIEditorView: View {
     @State private var showDeleteConfirm = false
     @State private var showQR = false
     @State private var isStartPoint = false
+    
+    // Multimedia
+    @Query private var allContents: [Content]
+    @State private var selectedMedia: [PhotosPickerItem] = []
+    @State private var isUploading = false
+    
+    private var poiContents: [Content] {
+        guard let poi = existingPOI else { return [] }
+        return allContents.filter { $0.poiId == poi.id }.sorted { $0.sortOrder < $1.sortOrder }
+    }
 
     private var existingPOI: POI? {
         if case .edit(let p) = mode { return p }
@@ -86,6 +98,44 @@ struct POIEditorView: View {
                             .scaledToFill()
                             .frame(height: 140)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+
+                // MARK: Multimedia & Tiering
+                if let poi = existingPOI {
+                    Section("Contenuti Multimediali (Tiered)") {
+                        ForEach(poiContents) { content in
+                            HStack {
+                                Image(systemName: content.contentType.icon)
+                                    .foregroundColor(Color("WWFGreen"))
+                                VStack(alignment: .leading) {
+                                    Text(content.contentType.displayName)
+                                        .font(.subheadline)
+                                    Text("Tier: \(content.tier.displayName)")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                if content.needsSync {
+                                    Image(systemName: "icloud.and.arrow.up")
+                                        .foregroundColor(.orange)
+                                }
+                            }
+                        }
+                        
+                        if isUploading {
+                            ProgressView("Caricamento e classificazione...")
+                        } else {
+                            PhotosPicker(selection: $selectedMedia, matching: .any(of: [.images, .videos])) {
+                                Label("Aggiungi Foto/Video", systemImage: "plus.circle")
+                                    .foregroundColor(Color("WWFGreen"))
+                            }
+                        }
+                    }
+                    .onChange(of: selectedMedia) { _, items in
+                        Task {
+                            await processAndUploadMedia(items, for: poi)
+                        }
                     }
                 }
 
@@ -181,6 +231,49 @@ struct POIEditorView: View {
             poi.needsSync = true
             poi.updatedAt = Date()
             onSave(poi)
+        }
+    }
+
+    private func processAndUploadMedia(_ items: [PhotosPickerItem], for poi: POI) async {
+        isUploading = true
+        defer { isUploading = false; selectedMedia = [] }
+        
+        for item in items {
+            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+            let contentType: ContentType = item.supportedContentTypes.contains(.video) ? .video : .image
+            
+            let tier = MediaClassificationService.shared.classify(type: contentType, sizeInBytes: data.count)
+            
+            let ext = contentType == .video ? "mp4" : "jpg"
+            let fileName = "\(UUID().uuidString).\(ext)"
+            let path = "pois/\(poi.id.uuidString)/\(tier.rawValue)/\(fileName)"
+            
+            do {
+                let url = try await StorageManager.shared.upload(
+                    data: data,
+                    path: path,
+                    bucket: "poi-multimedia",
+                    contentType: contentType == .video ? "video/mp4" : "image/jpeg"
+                )
+                
+                let newContent = Content(
+                    poiId: poi.id,
+                    type: contentType,
+                    tier: tier,
+                    fileURL: url,
+                    sortOrder: poiContents.count
+                )
+                
+                modelContext.insert(newContent)
+                try? modelContext.save()
+                
+                // Trigger background sync for the new content metadata
+                Task {
+                    await SyncManager.shared.pushAllChanges()
+                }
+            } catch {
+                print("Failed to upload/save content: \(error)")
+            }
         }
     }
 }

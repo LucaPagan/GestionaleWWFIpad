@@ -7,6 +7,7 @@ struct TrailDraftStep: Identifiable, Equatable {
     var instructions: String
     var distanceMeters: Int?
     var estimatedMinutes: Int?
+    var pathGeometry: String?
     
     static func == (lhs: TrailDraftStep, rhs: TrailDraftStep) -> Bool {
         lhs.id == rhs.id
@@ -218,6 +219,25 @@ struct TrailStepCard: View {
                             .keyboardType(.numberPad)
                             .textFieldStyle(.roundedBorder)
                     }
+                }
+                
+                if step.poi != nil {
+                    Button {
+                        // Action handled by parent via callback/binding
+                        NotificationCenter.default.post(name: NSNotification.Name("TriggerPathTracing"), object: step.id)
+                    } label: {
+                        HStack {
+                            Image(systemName: "scribble.variable")
+                            Text(step.pathGeometry == nil ? "Traccia percorso per arrivare qui" : "Ridisegna percorso")
+                        }
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(step.pathGeometry == nil ? Color.blue : Color.orange)
+                        .cornerRadius(8)
+                    }
+                    .padding(.top, 4)
                 }
             }
         }

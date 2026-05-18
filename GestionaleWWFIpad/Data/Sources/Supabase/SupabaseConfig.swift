@@ -9,6 +9,7 @@ import Combine
 protocol NetworkClient: Sendable {
     func rpc(_ functionName: String, params: [String: Any?]) async throws -> [String: Any]?
     func fetch(from table: String, query: String) async throws -> [[String: Any]]
+    func delete(from table: String, match: [String: String]) async throws
 }
 
 final class SupabaseConfig: NetworkClient, @unchecked Sendable {
@@ -17,38 +18,92 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
 
     private let projectURL = AppConfig.supabaseURL
     private let anonKey = AppConfig.supabaseAnonKey
+    
+    private var session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 300
+        config.httpMaximumConnectionsPerHost = 1
+        config.httpShouldUsePipelining = false
+        config.waitsForConnectivity = true
+        return URLSession(configuration: config)
+    }()
+    
+    /// A separate ephemeral session for storage tasks to avoid session-level protocol caching issues
+    private var storageSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 600
+        config.httpMaximumConnectionsPerHost = 1
+        config.httpShouldUsePipelining = false
+        return URLSession(configuration: config)
+    }()
+
+    // MARK: - Secure Token Storage (Keychain)
 
     private var accessToken: String? {
         didSet {
-            if let token = accessToken { UserDefaults.standard.set(token, forKey: "sb_access_token") }
-            else { UserDefaults.standard.removeObject(forKey: "sb_access_token") }
+            if let token = accessToken {
+                KeychainHelper.save(key: "sb_access_token", value: token)
+            } else {
+                KeychainHelper.delete(key: "sb_access_token")
+            }
         }
     }
     private var refreshToken: String? {
         didSet {
-            if let token = refreshToken { UserDefaults.standard.set(token, forKey: "sb_refresh_token") }
-            else { UserDefaults.standard.removeObject(forKey: "sb_refresh_token") }
+            if let token = refreshToken {
+                KeychainHelper.save(key: "sb_refresh_token", value: token)
+            } else {
+                KeychainHelper.delete(key: "sb_refresh_token")
+            }
         }
     }
     private var sessionUser: SupabaseUser? {
         didSet {
             if let user = sessionUser {
-                UserDefaults.standard.set(user.id, forKey: "sb_user_id")
-                UserDefaults.standard.set(user.email, forKey: "sb_user_email")
+                KeychainHelper.save(key: "sb_user_id", value: user.id)
+                if let email = user.email {
+                    KeychainHelper.save(key: "sb_user_email", value: email)
+                }
             } else {
-                UserDefaults.standard.removeObject(forKey: "sb_user_id")
-                UserDefaults.standard.removeObject(forKey: "sb_user_email")
+                KeychainHelper.delete(key: "sb_user_id")
+                KeychainHelper.delete(key: "sb_user_email")
             }
         }
     }
 
     private init() {
-        if let token = UserDefaults.standard.string(forKey: "sb_access_token"),
-           let id = UserDefaults.standard.string(forKey: "sb_user_id") {
+        // Migrate from UserDefaults to Keychain on first launch
+        Self.migrateFromUserDefaults()
+
+        if let token = KeychainHelper.load(key: "sb_access_token"),
+           let id = KeychainHelper.load(key: "sb_user_id") {
             self.accessToken = token
-            self.refreshToken = UserDefaults.standard.string(forKey: "sb_refresh_token")
-            let email = UserDefaults.standard.string(forKey: "sb_user_email")
+            self.refreshToken = KeychainHelper.load(key: "sb_refresh_token")
+            let email = KeychainHelper.load(key: "sb_user_email")
             self.sessionUser = SupabaseUser(id: id, email: email)
+        }
+    }
+
+    /// One-time migration: move tokens from UserDefaults to Keychain, then clear UserDefaults.
+    private static func migrateFromUserDefaults() {
+        let defaults = UserDefaults.standard
+        if let token = defaults.string(forKey: "sb_access_token") {
+            KeychainHelper.save(key: "sb_access_token", value: token)
+            defaults.removeObject(forKey: "sb_access_token")
+        }
+        if let token = defaults.string(forKey: "sb_refresh_token") {
+            KeychainHelper.save(key: "sb_refresh_token", value: token)
+            defaults.removeObject(forKey: "sb_refresh_token")
+        }
+        if let id = defaults.string(forKey: "sb_user_id") {
+            KeychainHelper.save(key: "sb_user_id", value: id)
+            defaults.removeObject(forKey: "sb_user_id")
+        }
+        if let email = defaults.string(forKey: "sb_user_email") {
+            KeychainHelper.save(key: "sb_user_email", value: email)
+            defaults.removeObject(forKey: "sb_user_email")
         }
     }
 
@@ -62,7 +117,7 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         let body: [String: String] = ["email": email, "password": password]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw SupabaseError.networkError("Invalid response")
@@ -118,7 +173,7 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         let body: [String: String] = ["refresh_token": rToken]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
             throw SupabaseError.networkError("Risposta non valida dal server")
@@ -141,23 +196,48 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         }
     }
 
-    private func performRequestWithRetry(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await URLSession.shared.data(for: request)
+    private func performRequestWithRetry(
+        _ request: URLRequest, 
+        useStorageSession: Bool = false
+    ) async throws -> (Data, HTTPURLResponse) {
+        var mutableRequest = request
+        mutableRequest.setValue("close", forHTTPHeaderField: "Connection")
+        
+        let nsRequest = (mutableRequest as NSURLRequest).mutableCopy() as? NSMutableURLRequest
+        if nsRequest?.responds(to: NSSelectorFromString("_setAllowsQUIC:")) == true {
+            nsRequest?.setValue(false, forKey: "allowsQUIC")
+            if let updatedRequest = nsRequest as URLRequest? {
+                mutableRequest = updatedRequest
+            }
+        }
+
+        let activeSession = useStorageSession ? storageSession : session
+        
+        // Helper to perform the actual network call based on request type
+        let (data, response) = try await activeSession.data(for: mutableRequest)
+        
         guard let httpResponse = response as? HTTPURLResponse else {
             throw SupabaseError.networkError("Risposta non valida")
         }
 
-        if httpResponse.statusCode == 401, refreshToken != nil {
+        // Supabase returns 401 or 400 with "exp" error when token is expired
+        let errorBody = String(data: data, encoding: .utf8) ?? ""
+        let isTokenExpired = httpResponse.statusCode == 401 || 
+                            (httpResponse.statusCode == 400 && errorBody.contains("exp"))
+
+        if isTokenExpired && refreshToken != nil {
             // Attempt to refresh the session
             try await refreshSession()
             
-            // Retry the request with the new token
+            // Rebuild the request with the new token
             var retryRequest = request
+            retryRequest.setValue("close", forHTTPHeaderField: "Connection")
             if let token = accessToken {
                 retryRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
             
-            let (retryData, retryResponse) = try await URLSession.shared.data(for: retryRequest)
+            // Retry with the same session
+            let (retryData, retryResponse) = try await activeSession.data(for: retryRequest)
             guard let retryHttpResponse = retryResponse as? HTTPURLResponse else {
                 throw SupabaseError.networkError("Risposta non valida al retry")
             }
@@ -180,8 +260,10 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
             request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
         }
 
-        let cleanParams = params.compactMapValues { $0 }
-        request.httpBody = try JSONSerialization.data(withJSONObject: cleanParams)
+        // Ensure all parameters are sent, using NSNull for nil values 
+        // to match the PostgreSQL function signature.
+        let sanitizedParams = params.mapValues { $0 ?? NSNull() }
+        request.httpBody = try JSONSerialization.data(withJSONObject: sanitizedParams)
 
         let (data, httpResponse) = try await performRequestWithRetry(request)
 
@@ -219,29 +301,92 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
     }
     
+    func delete(from table: String, match: [String: String]) async throws {
+        var queryItems = [String]()
+        for (key, value) in match {
+            queryItems.append("\(key)=eq.\(value)")
+        }
+        let queryString = queryItems.joined(separator: "&")
+        let urlString = "\(projectURL)/rest/v1/\(table)?\(queryString)"
+        guard let url = URL(string: urlString) else {
+            throw SupabaseError.networkError("Invalid URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(anonKey, forHTTPHeaderField: "apikey")
+
+        if let token = accessToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (_, httpResponse) = try await performRequestWithRetry(request)
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw SupabaseError.apiError("Delete from \(table) failed (\(httpResponse.statusCode))")
+        }
+    }
+    
     func uploadFile(bucket: String, path: String, data: Data, contentType: String = "image/jpeg") async throws -> String {
         let url = URL(string: "\(projectURL)/storage/v1/object/\(bucket)/\(path)")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         request.setValue(anonKey, forHTTPHeaderField: "apikey")
-
+        
+        // We handle the actual network call and retry inside a specialized block
+        // to support the 'upload' task type while still benefiting from performRequestWithRetry logic.
+        
+        // Ensure we have a fresh token before starting a large upload
         if let token = accessToken {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        request.httpBody = data
+        // For large uploads, it's safer to refresh the token BEFORE starting if we think it might be stale,
+        // but we'll rely on the error handling for now. 
+        // Note: performRequestWithRetry uses .data which isn't ideal for large bodies, 
+        // so we'll do a manual check-and-refresh for uploadFile to keep it efficient.
+        
+        func doUpload() async throws -> (Data, HTTPURLResponse) {
+            var uploadRequest = request
+            uploadRequest.setValue("close", forHTTPHeaderField: "Connection")
+            let nsRequest = (uploadRequest as NSURLRequest).mutableCopy() as? NSMutableURLRequest
+            if nsRequest?.responds(to: NSSelectorFromString("_setAllowsQUIC:")) == true {
+                nsRequest?.setValue(false, forKey: "allowsQUIC")
+                if let updated = nsRequest as URLRequest? { uploadRequest = updated }
+            }
+            if let token = accessToken {
+                uploadRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
+            let (d, r) = try await storageSession.upload(for: uploadRequest, from: data)
+            guard let hr = r as? HTTPURLResponse else { throw SupabaseError.networkError("No HTTP response") }
+            return (d, hr)
+        }
 
-        let (responseData, httpResponse) = try await performRequestWithRetry(request)
+        var (responseData, httpResponse) = try await doUpload()
+        
+        let errorBody = String(data: responseData, encoding: .utf8) ?? ""
+        let isTokenExpired = httpResponse.statusCode == 401 || 
+                            (httpResponse.statusCode == 400 && errorBody.contains("exp"))
+
+        if isTokenExpired && refreshToken != nil {
+            try await refreshSession()
+            (responseData, httpResponse) = try await doUpload()
+        }
 
         guard (200...299).contains(httpResponse.statusCode) else {
             let errorBody = String(data: responseData, encoding: .utf8) ?? ""
-            throw SupabaseError.storageError("Upload failed: \(errorBody)")
+            throw SupabaseError.storageError("Upload failed (\(httpResponse.statusCode)): \(errorBody)")
         }
 
-        return "\(projectURL)/storage/v1/object/public/\(bucket)/\(path)"
+        let publicURL = "\(projectURL)/storage/v1/object/public/\(bucket)/\(path)"
+        return publicURL
     }
 }
+
 
 struct SupabaseUser {
     let id: String
