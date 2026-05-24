@@ -30,10 +30,27 @@ struct EventBuilderView: View {
     @State private var requirements = ""
     @State private var targetAudience: EventAudience = .all
     @State private var price: Double = 0
-    @State private var selectedTrail: Trail? = nil
-    @State private var selectedPOI: POI? = nil
+    @State private var selectedTrailId: UUID? = nil
+    @State private var selectedPOIId: UUID? = nil
+    @State private var errorMessage: String?
+    @State private var isSaving = false
 
-    var isFormValid: Bool { !name.trimmingCharacters(in: .whitespaces).isEmpty }
+    var validationIssues: [AdminValidationIssue] {
+        AdminValidationService.eventIssues(
+            name: name,
+            isActive: isActive,
+            startTime: startTime,
+            endTime: endTime,
+            maxParticipants: maxParticipants,
+            price: price,
+            trail: selectedTrail,
+            eventPOI: selectedPOI
+        )
+    }
+
+    var isFormValid: Bool {
+        !validationIssues.contains { $0.severity == .error }
+    }
 
     var body: some View {
         NavigationStack {
@@ -45,16 +62,27 @@ struct EventBuilderView: View {
                 locationSection
                 trailSection
                 visibilitySection
+                validationSection
             }
             .navigationTitle(event == nil ? "Nuovo evento" : "Modifica evento")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Annulla") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Salva") { saveEvent() }.disabled(!isFormValid).fontWeight(.semibold)
+                    Button(isSaving ? "Salvataggio..." : "Salva") { saveEvent() }
+                        .disabled(!isFormValid || isSaving)
+                        .fontWeight(.semibold)
                 }
             }
             .onAppear { loadExistingData() }
+            .alert("Evento non valido", isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage ?? "")
+            }
         }
     }
 
@@ -124,8 +152,26 @@ struct EventBuilderView: View {
         } header: { Text("Requisiti e note") }
     }
 
+    private var selectedTrail: Trail? {
+        guard let selectedTrailId else { return nil }
+        return dedupedTrails.first { $0.id == selectedTrailId }
+    }
+
+    private var selectedPOI: POI? {
+        guard let selectedPOIId else { return nil }
+        return dedupedPOIs.first { $0.id == selectedPOIId }
+    }
+
+    private var dedupedPOIs: [POI] {
+        dedupe(allPOIs).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private var dedupedTrails: [Trail] {
+        dedupe(allTrails).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
     var startPointPOIs: [POI] {
-        allPOIs.filter { $0.isStartPoint }
+        dedupedPOIs.filter { $0.isStartPoint }
     }
 
     private var locationSection: some View {
@@ -135,9 +181,11 @@ struct EventBuilderView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
-                Picker("Luogo dell'evento", selection: $selectedPOI) {
-                    Text("Nessun luogo specifico").tag(Optional<POI>(nil))
-                    ForEach(startPointPOIs) { poi in Label(poi.name, systemImage: poi.type.icon).tag(Optional(poi)) }
+                Picker("Luogo dell'evento", selection: $selectedPOIId) {
+                    Text("Nessun luogo specifico").tag(UUID?.none)
+                    ForEach(startPointPOIs, id: \.id) { poi in
+                        Label(poi.name, systemImage: poi.type.icon).tag(Optional(poi.id))
+                    }
                 }
                 .pickerStyle(.menu).tint(Color("WWFGreen"))
             }
@@ -147,9 +195,11 @@ struct EventBuilderView: View {
 
     private var trailSection: some View {
         Section {
-            Picker("Percorso", selection: $selectedTrail) {
-                Text("Nessun percorso").tag(Optional<Trail>(nil))
-                ForEach(allTrails) { trail in Text(trail.name).tag(Optional(trail)) }
+            Picker("Percorso", selection: $selectedTrailId) {
+                Text("Nessun percorso").tag(UUID?.none)
+                ForEach(dedupedTrails, id: \.id) { trail in
+                    Text(trail.name).tag(Optional(trail.id))
+                }
             }
             .pickerStyle(.menu).tint(Color("WWFGreen"))
             if let trail = selectedTrail, let difficulty = trail.difficulty {
@@ -174,6 +224,20 @@ struct EventBuilderView: View {
         }
     }
 
+    private var validationSection: some View {
+        Group {
+            if !validationIssues.isEmpty {
+                Section("Controlli pubblicazione") {
+                    ForEach(validationIssues) { issue in
+                        Label(issue.message, systemImage: issue.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundColor(issue.severity == .error ? .red : .orange)
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func loadExistingData() {
@@ -183,10 +247,16 @@ struct EventBuilderView: View {
         maxParticipants = e.maxParticipants ?? 30; organizerName = e.organizerName ?? ""
         contactInfo = e.contactInfo ?? ""; requirements = e.requirements ?? ""
         targetAudience = e.targetAudience; price = e.price
-        selectedTrail = e.trail; selectedPOI = e.eventPOI
+        selectedTrailId = e.trail?.id; selectedPOIId = e.eventPOI?.id
     }
 
     private func saveEvent() {
+        let issues = validationIssues
+        if issues.contains(where: { $0.severity == .error }) {
+            errorMessage = issues.map(\.message).joined(separator: "\n")
+            return
+        }
+
         let t = event ?? Event(name: "", description: "")
         t.name = name; t.eventDescription = description; t.category = category
         t.isActive = isActive; t.date = eventDate; t.timeStart = startTime; t.timeEnd = endTime
@@ -201,11 +271,24 @@ struct EventBuilderView: View {
         if event == nil { context.insert(t) }
         try? context.save()
 
-        // Trigger background sync to push changes to Supabase
+        isSaving = true
         Task {
             await syncManager.pushAllChanges()
+            await MainActor.run {
+                isSaving = false
+                if case .error(let message) = syncManager.syncState {
+                    errorMessage = message
+                } else {
+                    dismiss()
+                }
+            }
         }
+    }
 
-        dismiss()
+    private func dedupe<T: Identifiable>(_ items: [T]) -> [T] where T.ID == UUID {
+        var seen = Set<UUID>()
+        return items.filter { item in
+            seen.insert(item.id).inserted
+        }
     }
 }

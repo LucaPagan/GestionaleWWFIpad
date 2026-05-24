@@ -55,6 +55,8 @@ struct WWFManagerApp: App {
                 Task {
                     if managerSession.isLoggedIn {
                         await syncManager.pushAllChanges()
+                    } else {
+                        await syncManager.pullLatestData()
                     }
                 }
             }

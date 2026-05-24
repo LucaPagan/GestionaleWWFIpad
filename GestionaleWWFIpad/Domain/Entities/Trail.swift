@@ -19,6 +19,9 @@ final class Trail {
 
     var steps: [TrailStep]
     var startPOIId: UUID?
+    var targetAge: String?
+    var descriptionKids: String?
+    var descriptionEasyRead: String?
 
     var createdAt: Date
     var updatedAt: Date
@@ -37,6 +40,9 @@ final class Trail {
         estimatedMinutes: Int? = 60,
         coverImageURL: String? = nil,
         startPOIId: UUID? = nil,
+        targetAge: String? = nil,
+        descriptionKids: String? = nil,
+        descriptionEasyRead: String? = nil,
         fixedID: UUID? = nil
     ) {
         self.id = fixedID ?? UUID()
@@ -48,6 +54,9 @@ final class Trail {
         self.coverImageURL = coverImageURL
         self.steps = []
         self.startPOIId = startPOIId
+        self.targetAge = targetAge
+        self.descriptionKids = descriptionKids
+        self.descriptionEasyRead = descriptionEasyRead
         self.createdAt = Date()
         self.updatedAt = Date()
         self.needsSync = true
@@ -74,6 +83,9 @@ final class Trail {
         if let spid = data["start_poi_id"] as? String {
             startPOIId = UUID(uuidString: spid)
         }
+        targetAge = data["target_age"] as? String
+        descriptionKids = data["description_kids"] as? String
+        descriptionEasyRead = data["description_easy_read"] as? String
         needsSync = false
     }
 }
@@ -88,7 +100,10 @@ extension Trail {
             "p_difficulty": difficultyRawValue,
             "p_estimated_minutes": estimatedMinutes,
             "p_cover_image_url": coverImageURL,
-            "p_start_poi_id": startPOIId?.uuidString
+            "p_start_poi_id": startPOIId?.uuidString,
+            "p_target_age": targetAge,
+            "p_description_kids": descriptionKids,
+            "p_description_easy_read": descriptionEasyRead
         ]
     }
 

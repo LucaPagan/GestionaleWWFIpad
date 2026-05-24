@@ -21,6 +21,9 @@ struct TrailBuilderSidebar: View {
     @Binding var difficulty: TrailDifficulty
     @Binding var estimatedMinutes: Int
     @Binding var isActive: Bool
+    @Binding var targetAge: String?
+    @Binding var descriptionKids: String?
+    @Binding var descriptionEasyRead: String?
     @Binding var steps: [TrailDraftStep]
     @Binding var selectedStartPOI: POI?
     
@@ -28,13 +31,32 @@ struct TrailBuilderSidebar: View {
     let onSave: () -> Void
     let onCancel: () -> Void
     let isSyncing: Bool
+    let validationIssues: [AdminValidationIssue]
 
     var isFormValid: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty && !steps.isEmpty
+        !name.trimmingCharacters(in: .whitespaces).isEmpty &&
+        !steps.isEmpty &&
+        !validationIssues.contains { $0.severity == .error }
     }
     
     var startPointPOIs: [POI] {
-        allPOIs.filter { $0.isStartPoint }
+        dedupedPOIs.filter { $0.isStartPoint }
+    }
+
+    var dedupedPOIs: [POI] {
+        var seen = Set<UUID>()
+        return allPOIs
+            .filter { seen.insert($0.id).inserted }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private var selectedStartPOIId: Binding<UUID?> {
+        Binding(
+            get: { selectedStartPOI?.id },
+            set: { newValue in
+                selectedStartPOI = newValue.flatMap { id in dedupedPOIs.first { $0.id == id } }
+            }
+        )
     }
     
     var body: some View {
@@ -79,6 +101,52 @@ struct TrailBuilderSidebar: View {
                     Toggle("Visibile ai visitatori", isOn: $isActive)
                         .tint(Color("WWFGreen"))
                 }
+
+                if !validationIssues.isEmpty {
+                    Section("Controlli pubblicazione") {
+                        ForEach(validationIssues) { issue in
+                            Label(issue.message, systemImage: issue.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundColor(issue.severity == .error ? .red : .orange)
+                        }
+                    }
+                }
+                
+                Section("Accessibilità") {
+                    Picker("Target Età", selection: $targetAge) {
+                        Text("Tutti").tag(String?.none)
+                        Text("Bambini").tag("kids" as String?)
+                        Text("Adulti").tag("adults" as String?)
+                    }
+                }
+                
+                Section("Testi Semplificati (Opzionali)") {
+                    ZStack(alignment: .topLeading) {
+                        if (descriptionKids ?? "").isEmpty {
+                            Text("Descrizione per Bambini...")
+                                .foregroundColor(.secondary)
+                                .padding(.top, 8)
+                        }
+                        TextEditor(text: Binding(
+                            get: { descriptionKids ?? "" },
+                            set: { descriptionKids = $0.isEmpty ? nil : $0 }
+                        ))
+                        .frame(minHeight: 60)
+                    }
+                    
+                    ZStack(alignment: .topLeading) {
+                        if (descriptionEasyRead ?? "").isEmpty {
+                            Text("Descrizione Alta Comprensione...")
+                                .foregroundColor(.secondary)
+                                .padding(.top, 8)
+                        }
+                        TextEditor(text: Binding(
+                            get: { descriptionEasyRead ?? "" },
+                            set: { descriptionEasyRead = $0.isEmpty ? nil : $0 }
+                        ))
+                        .frame(minHeight: 60)
+                    }
+                }
                 
                 Section {
                     if startPointPOIs.isEmpty {
@@ -86,10 +154,10 @@ struct TrailBuilderSidebar: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
-                        Picker("Seleziona punto di partenza", selection: $selectedStartPOI) {
-                            Text("Nessuno").tag(POI?.none)
-                            ForEach(startPointPOIs) { poi in
-                                Text(poi.name).tag(poi as POI?)
+                        Picker("Seleziona punto di partenza", selection: selectedStartPOIId) {
+                            Text("Nessuno").tag(UUID?.none)
+                            ForEach(startPointPOIs, id: \.id) { poi in
+                                Text(poi.name).tag(Optional(poi.id))
                             }
                         }
                         .pickerStyle(.menu)
@@ -101,7 +169,7 @@ struct TrailBuilderSidebar: View {
                 
                 Section {
                     ForEach($steps) { $step in
-                        TrailStepCard(step: $step, allPOIs: allPOIs)
+                        TrailStepCard(step: $step, allPOIs: dedupedPOIs)
                     }
                     .onMove { steps.move(fromOffsets: $0, toOffset: $1) }
                     .onDelete { steps.remove(atOffsets: $0) }
@@ -162,6 +230,15 @@ struct TrailStepCard: View {
     @Binding var step: TrailDraftStep
     let allPOIs: [POI]
     @State private var isExpanded = false
+
+    private var selectedPOIId: Binding<UUID?> {
+        Binding(
+            get: { step.poi?.id },
+            set: { newValue in
+                step.poi = newValue.flatMap { id in allPOIs.first { $0.id == id } }
+            }
+        )
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -192,10 +269,10 @@ struct TrailStepCard: View {
             if isExpanded {
                 Divider()
                 
-                Picker("Punto di interesse", selection: $step.poi) {
-                    Text("Nessuno").tag(POI?.none)
-                    ForEach(allPOIs) { p in
-                        Text(p.name).tag(p as POI?)
+                Picker("Punto di interesse", selection: selectedPOIId) {
+                    Text("Nessuno").tag(UUID?.none)
+                    ForEach(allPOIs, id: \.id) { p in
+                        Text(p.name).tag(Optional(p.id))
                     }
                 }
                 .pickerStyle(.menu)

@@ -8,6 +8,7 @@ struct MapEditorView: View {
     @Environment(\.modelContext) private var context
     @EnvironmentObject private var syncManager: SyncManager
     @Query private var allPOIs: [POI]
+    @Query private var allContents: [Content]
 
     // MARK: - States for POI Editor
     @State private var showPOIEditor    = false
@@ -35,9 +36,13 @@ struct MapEditorView: View {
     @State private var tbDifficulty: TrailDifficulty = .easy
     @State private var tbEstimatedMinutes: Int = 60
     @State private var tbIsActive: Bool = false
+    @State private var tbTargetAge: String? = nil
+    @State private var tbDescriptionKids: String? = nil
+    @State private var tbDescriptionEasyRead: String? = nil
     @State private var tbSteps: [TrailDraftStep] = []
     @State private var tbSelectedStartPOI: POI? = nil
     @State private var tbIsSyncing: Bool = false
+    @State private var adminErrorMessage: String?
     
     // Path Tracing State
     @State private var tbTracingStepId: UUID? = nil
@@ -117,12 +122,16 @@ struct MapEditorView: View {
                             difficulty: $tbDifficulty,
                             estimatedMinutes: $tbEstimatedMinutes,
                             isActive: $tbIsActive,
+                            targetAge: $tbTargetAge,
+                            descriptionKids: $tbDescriptionKids,
+                            descriptionEasyRead: $tbDescriptionEasyRead,
                             steps: $tbSteps,
                             selectedStartPOI: $tbSelectedStartPOI,
                             allPOIs: allPOIs,
                             onSave: saveTrail,
                             onCancel: closeTrailBuilder,
-                            isSyncing: tbIsSyncing
+                            isSyncing: tbIsSyncing,
+                            validationIssues: currentTrailIssues
                         )
                         .frame(width: max(350, geo.size.width * 0.35))
                         .transition(.move(edge: .trailing))
@@ -159,6 +168,14 @@ struct MapEditorView: View {
                     showTrailList = false
                     openTrailBuilder(for: trail)
                 })
+            }
+            .alert("Controlli gestione", isPresented: Binding(
+                get: { adminErrorMessage != nil },
+                set: { if !$0 { adminErrorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(adminErrorMessage ?? "")
             }
         }
         // Aggiungiamo un'animazione globale quando cambia la modalità
@@ -289,6 +306,17 @@ struct MapEditorView: View {
 
     // MARK: - Trail Logic
 
+    private var currentTrailIssues: [AdminValidationIssue] {
+        AdminValidationService.trailIssues(
+            name: tbName,
+            estimatedMinutes: tbEstimatedMinutes,
+            isActive: tbIsActive,
+            startPOI: tbSelectedStartPOI,
+            steps: tbSteps,
+            contents: allContents
+        )
+    }
+
     private func openTrailBuilder(for trail: Trail?) {
         if let t = trail {
             tbName = t.name
@@ -296,6 +324,9 @@ struct MapEditorView: View {
             tbDifficulty = t.difficulty ?? .easy
             tbEstimatedMinutes = t.estimatedMinutes ?? 60
             tbIsActive = t.isActive
+            tbTargetAge = t.targetAge
+            tbDescriptionKids = t.descriptionKids
+            tbDescriptionEasyRead = t.descriptionEasyRead
             if let startId = t.startPOIId {
                 tbSelectedStartPOI = allPOIs.first { $0.id == startId }
             }
@@ -314,6 +345,9 @@ struct MapEditorView: View {
             tbDifficulty = .easy
             tbEstimatedMinutes = 60
             tbIsActive = false
+            tbTargetAge = nil
+            tbDescriptionKids = nil
+            tbDescriptionEasyRead = nil
             tbSelectedStartPOI = nil
             tbSteps = []
         }
@@ -325,6 +359,12 @@ struct MapEditorView: View {
     }
 
     private func saveTrail() {
+        let issues = currentTrailIssues
+        if issues.contains(where: { $0.severity == .error }) {
+            adminErrorMessage = issues.map(\.message).joined(separator: "\n")
+            return
+        }
+
         tbIsSyncing = true
         let target = mapMode.trail ?? Trail(name: "", description: "")
         target.name = tbName
@@ -332,6 +372,9 @@ struct MapEditorView: View {
         target.difficulty = tbDifficulty
         target.estimatedMinutes = tbEstimatedMinutes
         target.isActive = tbIsActive
+        target.targetAge = tbTargetAge
+        target.descriptionKids = tbDescriptionKids
+        target.descriptionEasyRead = tbDescriptionEasyRead
         target.startPOIId = tbSelectedStartPOI?.id
         target.needsSync = true
         target.updatedAt = Date()
@@ -357,7 +400,11 @@ struct MapEditorView: View {
             await syncManager.pushAllChanges()
             await MainActor.run {
                 tbIsSyncing = false
-                closeTrailBuilder()
+                if case .error(let message) = syncManager.syncState {
+                    adminErrorMessage = message
+                } else {
+                    closeTrailBuilder()
+                }
             }
         }
     }

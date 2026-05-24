@@ -9,6 +9,7 @@
 import SwiftUI
 import PhotosUI
 import SwiftData
+import UniformTypeIdentifiers
 
 enum POIEditorMode {
     case create(x: Double, y: Double)
@@ -25,6 +26,8 @@ struct POIEditorView: View {
 
     @State private var name: String = ""
     @State private var description: String = ""
+    @State private var descriptionKids: String = ""
+    @State private var descriptionEasyRead: String = ""
     @State private var type: POIType = .landmark
     @State private var selectedPhoto: PhotosPickerItem? = nil
     @State private var photoData: Data? = nil
@@ -36,6 +39,10 @@ struct POIEditorView: View {
     @Query private var allContents: [Content]
     @State private var selectedMedia: [PhotosPickerItem] = []
     @State private var isUploading = false
+    @State private var importContentType: ContentType = .audio
+    @State private var importTier: ContentTier = .full
+    @State private var showFileImporter = false
+    @State private var errorMessage: String?
     
     private var poiContents: [Content] {
         guard let poi = existingPOI else { return [] }
@@ -49,7 +56,37 @@ struct POIEditorView: View {
 
     var isFormValid: Bool {
         !name.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !description.trimmingCharacters(in: .whitespaces).isEmpty
+        !description.trimmingCharacters(in: .whitespaces).isEmpty &&
+        validationIssues.isEmpty
+    }
+
+    var validationIssues: [AdminValidationIssue] {
+        var issues: [AdminValidationIssue] = []
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            issues.append(.init(severity: .error, message: "POI: nome mancante."))
+        }
+        if description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            issues.append(.init(severity: .error, message: "POI: descrizione mancante."))
+        }
+
+        let coordinates: (x: Double, y: Double)
+        switch mode {
+        case .create(let x, let y):
+            coordinates = (x, y)
+        case .edit(let poi):
+            coordinates = (poi.x, poi.y)
+            if poi.qrPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                issues.append(.init(severity: .error, message: "POI: QR payload mancante."))
+            }
+            if poi.numericCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                issues.append(.init(severity: .error, message: "POI: codice numerico mancante."))
+            }
+        }
+
+        if coordinates.x < 0 || coordinates.y < 0 || !coordinates.x.isFinite || !coordinates.y.isFinite {
+            issues.append(.init(severity: .error, message: "POI: coordinate mappa non valide."))
+        }
+        return issues
     }
 
     var body: some View {
@@ -67,6 +104,28 @@ struct POIEditorView: View {
                         }
                         TextEditor(text: $description)
                             .frame(minHeight: 80)
+                    }
+                }
+
+                Section("Testi Semplificati (Opzionali)") {
+                    ZStack(alignment: .topLeading) {
+                        if descriptionKids.isEmpty {
+                            Text("Descrizione per Bambini...")
+                                .foregroundColor(.secondary)
+                                .padding(.top, 8)
+                        }
+                        TextEditor(text: $descriptionKids)
+                            .frame(minHeight: 60)
+                    }
+                    
+                    ZStack(alignment: .topLeading) {
+                        if descriptionEasyRead.isEmpty {
+                            Text("Descrizione Alta Comprensione...")
+                                .foregroundColor(.secondary)
+                                .padding(.top, 8)
+                        }
+                        TextEditor(text: $descriptionEasyRead)
+                            .frame(minHeight: 60)
                     }
                 }
 
@@ -126,8 +185,28 @@ struct POIEditorView: View {
                         if isUploading {
                             ProgressView("Caricamento e classificazione...")
                         } else {
+                            Picker("Tier nuovo contenuto", selection: $importTier) {
+                                ForEach(ContentTier.allCases, id: \.self) { tier in
+                                    Text(tier.displayName).tag(tier)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+
                             PhotosPicker(selection: $selectedMedia, matching: .any(of: [.images, .videos])) {
                                 Label("Aggiungi Foto/Video", systemImage: "plus.circle")
+                                    .foregroundColor(Color("WWFGreen"))
+                            }
+
+                            Picker("Tipo file", selection: $importContentType) {
+                                Text("Audio").tag(ContentType.audio)
+                                Text("Modello 3D").tag(ContentType.model3d)
+                            }
+                            .pickerStyle(.segmented)
+
+                            Button {
+                                showFileImporter = true
+                            } label: {
+                                Label("Aggiungi Audio/3D", systemImage: "square.and.arrow.up")
                                     .foregroundColor(Color("WWFGreen"))
                             }
                         }
@@ -135,6 +214,23 @@ struct POIEditorView: View {
                     .onChange(of: selectedMedia) { _, items in
                         Task {
                             await processAndUploadMedia(items, for: poi)
+                        }
+                    }
+                    .fileImporter(
+                        isPresented: $showFileImporter,
+                        allowedContentTypes: importContentType == .audio ? [.audio] : [UTType(filenameExtension: "usdz") ?? .data, .item],
+                        allowsMultipleSelection: false
+                    ) { result in
+                        Task { await importFile(result, for: poi) }
+                    }
+                }
+
+                if !validationIssues.isEmpty {
+                    Section("Controlli") {
+                        ForEach(validationIssues) { issue in
+                            Label(issue.message, systemImage: "xmark.octagon.fill")
+                                .font(.caption)
+                                .foregroundColor(.red)
                         }
                     }
                 }
@@ -202,6 +298,14 @@ struct POIEditorView: View {
                     QRDisplayView(poi: poi)
                 }
             }
+            .alert("Errore contenuto", isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage ?? "")
+            }
         }
     }
 
@@ -211,20 +315,39 @@ struct POIEditorView: View {
         guard let poi = existingPOI else { return }
         name = poi.name
         description = poi.poiDescription
+        descriptionKids = poi.descriptionKids ?? ""
+        descriptionEasyRead = poi.descriptionEasyRead ?? ""
         type = poi.type
         photoData = poi.photoData
         isStartPoint = poi.isStartPoint
     }
 
     private func savePOI() {
+        if !validationIssues.isEmpty {
+            errorMessage = validationIssues.map(\.message).joined(separator: "\n")
+            return
+        }
+
         switch mode {
         case .create(let x, let y):
-            let poi = POI(name: name, description: description, x: x, y: y, type: type, photoData: photoData, isStartPoint: isStartPoint)
+            let poi = POI(
+                name: name,
+                description: description,
+                x: x,
+                y: y,
+                type: type,
+                photoData: photoData,
+                isStartPoint: isStartPoint,
+                descriptionKids: descriptionKids.isEmpty ? nil : descriptionKids,
+                descriptionEasyRead: descriptionEasyRead.isEmpty ? nil : descriptionEasyRead
+            )
             poi.needsSync = true
             onSave(poi)
         case .edit(let poi):
             poi.name = name
             poi.poiDescription = description
+            poi.descriptionKids = descriptionKids.isEmpty ? nil : descriptionKids
+            poi.descriptionEasyRead = descriptionEasyRead.isEmpty ? nil : descriptionEasyRead
             poi.type = type
             poi.photoData = photoData
             poi.isStartPoint = isStartPoint
@@ -242,7 +365,8 @@ struct POIEditorView: View {
             guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
             let contentType: ContentType = item.supportedContentTypes.contains(.video) ? .video : .image
             
-            let tier = MediaClassificationService.shared.classify(type: contentType, sizeInBytes: data.count)
+            let classifiedTier = MediaClassificationService.shared.classify(type: contentType, sizeInBytes: data.count)
+            let tier = importTier.rawValue == ContentTier.full.rawValue ? classifiedTier : importTier
             
             let ext = contentType == .video ? "mp4" : "jpg"
             let fileName = "\(UUID().uuidString).\(ext)"
@@ -272,8 +396,68 @@ struct POIEditorView: View {
                     await SyncManager.shared.pushAllChanges()
                 }
             } catch {
-                print("Failed to upload/save content: \(error)")
+                errorMessage = "Upload contenuto non riuscito: \(error.localizedDescription)"
             }
         }
+    }
+
+    private func importFile(_ result: Result<[URL], Error>, for poi: POI) async {
+        guard case let .success(urls) = result, let url = urls.first else {
+            if case let .failure(error) = result {
+                errorMessage = "Import file non riuscito: \(error.localizedDescription)"
+            }
+            return
+        }
+
+        isUploading = true
+        defer { isUploading = false }
+
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+        }
+
+        do {
+            let data = try Data(contentsOf: url)
+            let ext = url.pathExtension.isEmpty ? importContentType.defaultFileExtension : url.pathExtension
+            let fileName = "\(UUID().uuidString).\(ext)"
+            let path = "pois/\(poi.id.uuidString)/\(importTier.rawValue)/\(fileName)"
+            let mimeType = mimeTypeForImportedFile(url: url, contentType: importContentType)
+
+            let remoteURL = try await StorageManager.shared.upload(
+                data: data,
+                path: path,
+                bucket: "poi-multimedia",
+                contentType: mimeType
+            )
+
+            let content = Content(
+                poiId: poi.id,
+                type: importContentType,
+                tier: importTier,
+                fileURL: remoteURL,
+                sortOrder: poiContents.count
+            )
+
+            let issues = AdminValidationService.contentIssues(content)
+            guard !issues.contains(where: { $0.severity == .error }) else {
+                errorMessage = issues.map(\.message).joined(separator: "\n")
+                return
+            }
+
+            modelContext.insert(content)
+            try modelContext.save()
+            await SyncManager.shared.pushAllChanges()
+        } catch {
+            errorMessage = "Upload contenuto non riuscito: \(error.localizedDescription)"
+        }
+    }
+
+    private func mimeTypeForImportedFile(url: URL, contentType: ContentType) -> String {
+        if let type = UTType(filenameExtension: url.pathExtension),
+           let mime = type.preferredMIMEType {
+            return mime
+        }
+        return contentType.defaultMimeType
     }
 }

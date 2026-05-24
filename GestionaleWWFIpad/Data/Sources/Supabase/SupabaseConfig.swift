@@ -8,6 +8,7 @@ import Combine
 
 protocol NetworkClient: Sendable {
     func rpc(_ functionName: String, params: [String: Any?]) async throws -> [String: Any]?
+    func invokeFunction(_ functionName: String, body: [String: Any?]) async throws -> [String: Any]?
     func fetch(from table: String, query: String) async throws -> [[String: Any]]
     func delete(from table: String, match: [String: String]) async throws
 }
@@ -275,6 +276,34 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
+    func invokeFunction(_ functionName: String, body: [String: Any?]) async throws -> [String: Any]? {
+        guard let url = URL(string: "\(projectURL)/functions/v1/\(functionName)") else {
+            throw SupabaseError.networkError("Invalid Edge Function URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(anonKey, forHTTPHeaderField: "apikey")
+
+        if let token = accessToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        request.httpBody = try JSONSerialization.data(withJSONObject: body.mapValues { $0 ?? NSNull() })
+
+        let (data, httpResponse) = try await performRequestWithRetry(request)
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw SupabaseError.apiError("Edge Function \(functionName) failed (\(httpResponse.statusCode)): \(errorBody)")
+        }
+
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
     func fetch(from table: String, query: String = "") async throws -> [[String: Any]] {
         let urlString = "\(projectURL)/rest/v1/\(table)\(query.isEmpty ? "" : "?\(query)")"
         guard let url = URL(string: urlString) else {
@@ -336,6 +365,7 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         request.httpMethod = "POST"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         request.setValue(anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("true", forHTTPHeaderField: "x-upsert")
         
         // We handle the actual network call and retry inside a specialized block
         // to support the 'upload' task type while still benefiting from performRequestWithRetry logic.

@@ -14,6 +14,14 @@ enum SyncState: Equatable {
     case error(message: String)
 }
 
+struct AdminSyncError: LocalizedError {
+    let messages: [String]
+
+    var errorDescription: String? {
+        messages.joined(separator: "\n")
+    }
+}
+
 @MainActor
 final class SyncManager: ObservableObject {
     static let shared = SyncManager()
@@ -43,9 +51,10 @@ final class SyncManager: ObservableObject {
             syncState = .syncing(entity: "Dati in background")
             
             let worker = SyncWorker(modelContainer: container, networkClient: networkClient, storageService: storageService)
-            let resultCount = try await worker.performPush()
+            let pushedCount = try await worker.performPush()
+            let pulledCount = try await worker.performPull()
             
-            syncState = .success(count: resultCount)
+            syncState = .success(count: pushedCount + pulledCount)
             lastSyncDate = Date()
             updatePendingCount()
         } catch {
@@ -137,8 +146,16 @@ actor SyncWorker: ModelActor {
     }
 
     func performPush() async throws -> Int {
+        var changedCount = 0
+        var bundleCandidates = Set<UUID>()
+
         let dirtyPOIs = try modelContext.fetch(FetchDescriptor<POI>(predicate: #Predicate { $0.needsSync == true }))
         for poi in dirtyPOIs {
+            let issues = AdminValidationService.poiIssues(poi)
+            if issues.contains(where: { $0.severity == .error }) {
+                throw AdminSyncError(messages: issues.map(\.message))
+            }
+
             if let photoData = poi.photoData, poi.photoURL == nil {
                 let url = try await storageService.uploadImage(data: photoData, path: "pois/\(poi.id.uuidString).jpg")
                 poi.photoURL = url
@@ -152,57 +169,162 @@ actor SyncWorker: ModelActor {
             ])
             
             poi.needsSync = false
+            changedCount += 1
+            bundleCandidates.formUnion(try activeTrailIds(containingPOI: poi.id))
+        }
+
+        let dirtyContents = try modelContext.fetch(FetchDescriptor<Content>(predicate: #Predicate { $0.needsSync == true }))
+        for content in dirtyContents {
+            let issues = AdminValidationService.contentIssues(content)
+            if issues.contains(where: { $0.severity == .error }) {
+                throw AdminSyncError(messages: issues.map(\.message))
+            }
+
+            _ = try await networkClient.rpc("upsert_content", params: content.toSupabaseParams())
+            content.needsSync = false
+            changedCount += 1
+            bundleCandidates.formUnion(try activeTrailIds(containingPOI: content.poiId))
         }
 
         let dirtyTrails = try modelContext.fetch(FetchDescriptor<Trail>(predicate: #Predicate { $0.needsSync == true }))
         for trail in dirtyTrails {
-            _ = try await networkClient.rpc("upsert_path", params: trail.toSupabaseParams())
-            let stepsParams: [String: Any?] = [
-                "p_path_id": trail.id.uuidString,
-                "p_steps": trail.stepsToJSON()
-            ]
-            _ = try await networkClient.rpc("sync_path_steps", params: stepsParams)
-            
-            // Auto-generate translations for Trail name and description
-            await pushTranslations(table: "paths", recordId: trail.id, fields: [
-                "name": trail.name,
-                "description": trail.trailDescription
-            ])
-            
-            // Auto-generate translations for each step's direction hint
-            for step in trail.steps {
-                if let hint = step.directionHint {
-                    await pushTranslations(table: "path_steps", recordId: step.id, fields: [
-                        "direction_hint": hint
-                    ])
-                }
+            try await syncTrailWithPublishGate(trail)
+            changedCount += 1
+            if trail.isActive { bundleCandidates.insert(trail.id) }
+        }
+
+        for trailId in bundleCandidates {
+            let descriptor = FetchDescriptor<Trail>(predicate: #Predicate { $0.id == trailId })
+            guard let trail = try modelContext.fetch(descriptor).first, trail.isActive, !trail.needsSync else { continue }
+            let contents = try allContents()
+            let issues = AdminValidationService.trailIssues(trail: trail, contents: contents)
+            if issues.contains(where: { $0.severity == .error }) {
+                throw AdminSyncError(messages: issues.map(\.message))
             }
-            
-            trail.needsSync = false
+            try await regenerateAndVerifyBundles(for: trail)
         }
 
         let dirtyEvents = try modelContext.fetch(FetchDescriptor<Event>(predicate: #Predicate { $0.needsSync == true }))
         for event in dirtyEvents {
+            let issues = AdminValidationService.eventIssues(event)
+            if issues.contains(where: { $0.severity == .error }) {
+                throw AdminSyncError(messages: issues.map(\.message))
+            }
+
             if let photoData = event.photoData, event.imageURL == nil {
                 let url = try await storageService.uploadImage(data: photoData, path: "events/\(event.id.uuidString).jpg")
                 event.imageURL = url
             }
             _ = try await networkClient.rpc("upsert_event", params: event.toSupabaseParams())
             event.needsSync = false
-        }
-
-        let dirtyContents = try modelContext.fetch(FetchDescriptor<Content>(predicate: #Predicate { $0.needsSync == true }))
-        for content in dirtyContents {
-            do {
-                _ = try await networkClient.rpc("upsert_content", params: content.toSupabaseParams())
-                content.needsSync = false
-            } catch {
-                print("Failed to sync content \(content.id): \(error)")
-            }
+            changedCount += 1
         }
 
         try? modelContext.save()
-        return dirtyPOIs.count + dirtyTrails.count + dirtyEvents.count + dirtyContents.count
+        return changedCount
+    }
+
+    private func syncTrailWithPublishGate(_ trail: Trail) async throws {
+        let desiredActive = trail.isActive
+        let contents = try allContents()
+        let issues = AdminValidationService.trailIssues(trail: trail, contents: contents)
+        if issues.contains(where: { $0.severity == .error }) {
+            throw AdminSyncError(messages: issues.map(\.message))
+        }
+
+        if desiredActive {
+            trail.isActive = false
+            try await pushTrail(trail)
+            try await regenerateAndVerifyBundles(for: trail)
+            trail.isActive = true
+            try await pushTrail(trail)
+            try await regenerateAndVerifyBundles(for: trail)
+        } else {
+            try await pushTrail(trail)
+        }
+
+        trail.needsSync = false
+    }
+
+    private func pushTrail(_ trail: Trail) async throws {
+        _ = try await networkClient.rpc("upsert_path", params: trail.toSupabaseParams())
+        let stepsParams: [String: Any?] = [
+            "p_path_id": trail.id.uuidString,
+            "p_steps": trail.stepsToJSON()
+        ]
+        _ = try await networkClient.rpc("sync_path_steps", params: stepsParams)
+
+        await pushTranslations(table: "paths", recordId: trail.id, fields: [
+            "name": trail.name,
+            "description": trail.trailDescription
+        ])
+
+        for step in trail.steps {
+            if let hint = step.directionHint {
+                await pushTranslations(table: "path_steps", recordId: step.id, fields: [
+                    "direction_hint": hint
+                ])
+            }
+        }
+    }
+
+    private func regenerateAndVerifyBundles(for trail: Trail) async throws {
+        for tier in ContentTier.allCases {
+            _ = try await networkClient.invokeFunction("generate-bundle", body: [
+                "path_id": trail.id.uuidString,
+                "tier": tier.rawValue
+            ])
+        }
+
+        let readiness = try await fetchBundleReadiness(pathId: trail.id)
+        let bundleIssues = AdminValidationService.bundleIssues(for: readiness, localUpdatedAt: trail.updatedAt)
+        if bundleIssues.contains(where: { $0.severity == .error }) {
+            throw AdminSyncError(messages: bundleIssues.map(\.message))
+        }
+    }
+
+    private func fetchBundleReadiness(pathId: UUID) async throws -> [BundleReadiness] {
+        let query = "select=tier,is_ready,manifest_sha256,generated_at,updated_at,size_bytes,generation_status&path_id=eq.\(pathId.uuidString)"
+        let rows = try await networkClient.fetch(from: "download_packages", query: query)
+        return rows.compactMap { row in
+            guard let tierRaw = row["tier"] as? String, let tier = ContentTier(rawValue: tierRaw) else { return nil }
+            return BundleReadiness(
+                tier: tier,
+                isReady: row["is_ready"] as? Bool ?? false,
+                manifestSHA256: row["manifest_sha256"] as? String,
+                generatedAt: Self.parseDate(row["generated_at"] as? String),
+                updatedAt: Self.parseDate(row["updated_at"] as? String),
+                sizeBytes: Self.int64Value(row["size_bytes"]),
+                generationStatus: row["generation_status"] as? String
+            )
+        }
+    }
+
+    private func activeTrailIds(containingPOI poiId: UUID) throws -> Set<UUID> {
+        let trails = try modelContext.fetch(FetchDescriptor<Trail>())
+        return Set(trails.filter { trail in
+            trail.isActive && trail.steps.contains { $0.poi?.id == poiId }
+        }.map(\.id))
+    }
+
+    private func allContents() throws -> [Content] {
+        try modelContext.fetch(FetchDescriptor<Content>())
+    }
+
+    private static func int64Value(_ value: Any?) -> Int64 {
+        if let number = value as? NSNumber { return number.int64Value }
+        if let int = value as? Int { return Int64(int) }
+        if let string = value as? String, let parsed = Int64(string) { return parsed }
+        return 0
+    }
+
+    private static func parseDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
     }
 
     private func pushTranslations(table: String, recordId: UUID, fields: [String: String]) async {
@@ -240,6 +362,7 @@ actor SyncWorker: ModelActor {
             }
             downloadedCount += 1
         }
+        try removeDuplicatePOIs()
 
         // Pull Paths
         let remotePaths = try await networkClient.fetch(from: "paths", query: "select=*")
@@ -251,6 +374,49 @@ actor SyncWorker: ModelActor {
             } else {
                 if let newTrail = createTrailFromRemote(pathData) { modelContext.insert(newTrail) }
             }
+            downloadedCount += 1
+        }
+        try removeDuplicateTrails()
+
+        // Pull PathSteps (con path_geometry per i sentieri disegnati)
+        let remoteSteps = try await networkClient.fetch(
+            from: "path_steps",
+            query: "select=*&order=step_order.asc"
+        )
+        for data in remoteSteps {
+            guard let idStr = data["id"] as? String, let remoteId = UUID(uuidString: idStr) else { continue }
+            guard let pathIdStr = data["path_id"] as? String, let pathId = UUID(uuidString: pathIdStr) else { continue }
+            guard let poiIdStr = data["poi_id"] as? String, let poiId = UUID(uuidString: poiIdStr) else { continue }
+
+            let stepDescriptor = FetchDescriptor<TrailStep>(predicate: #Predicate { $0.id == remoteId })
+            if let existingStep = try modelContext.fetch(stepDescriptor).first {
+                // Update from remote data
+                existingStep.stepOrder = data["step_order"] as? Int ?? existingStep.stepOrder
+                existingStep.directionHint = data["direction_hint"] as? String
+                existingStep.distanceMeters = data["distance_meters"] as? Int
+                existingStep.estimatedMinutes = data["estimated_minutes"] as? Int
+                existingStep.pathGeometry = data["path_geometry"] as? String
+                downloadedCount += 1
+                continue
+            }
+
+            // Find parent trail and POI
+            let trailDescriptor = FetchDescriptor<Trail>(predicate: #Predicate { $0.id == pathId })
+            let poiDescriptor = FetchDescriptor<POI>(predicate: #Predicate { $0.id == poiId })
+
+            guard let trail = try modelContext.fetch(trailDescriptor).first,
+                  let poi = try modelContext.fetch(poiDescriptor).first else { continue }
+
+            let step = TrailStep(
+                stepOrder: data["step_order"] as? Int ?? 0,
+                directionHint: data["direction_hint"] as? String,
+                distanceMeters: data["distance_meters"] as? Int,
+                estimatedMinutes: data["estimated_minutes"] as? Int,
+                pathGeometry: data["path_geometry"] as? String,
+                poi: poi,
+                fixedID: remoteId
+            )
+            trail.steps.append(step)
             downloadedCount += 1
         }
 
@@ -282,6 +448,46 @@ actor SyncWorker: ModelActor {
 
         try modelContext.save()
         return downloadedCount
+    }
+
+    private func removeDuplicatePOIs() throws {
+        var canonicalById: [UUID: POI] = [:]
+        let pois = try modelContext.fetch(FetchDescriptor<POI>())
+
+        for poi in pois {
+            if let canonical = canonicalById[poi.id] {
+                if canonical.needsSync && !poi.needsSync {
+                    modelContext.delete(poi)
+                } else if !canonical.needsSync && poi.needsSync {
+                    modelContext.delete(canonical)
+                    canonicalById[poi.id] = poi
+                } else {
+                    modelContext.delete(poi)
+                }
+            } else {
+                canonicalById[poi.id] = poi
+            }
+        }
+    }
+
+    private func removeDuplicateTrails() throws {
+        var canonicalById: [UUID: Trail] = [:]
+        let trails = try modelContext.fetch(FetchDescriptor<Trail>())
+
+        for trail in trails {
+            if let canonical = canonicalById[trail.id] {
+                if canonical.needsSync && !trail.needsSync {
+                    modelContext.delete(trail)
+                } else if !canonical.needsSync && trail.needsSync {
+                    modelContext.delete(canonical)
+                    canonicalById[trail.id] = trail
+                } else {
+                    modelContext.delete(trail)
+                }
+            } else {
+                canonicalById[trail.id] = trail
+            }
+        }
     }
     
     private func createPOIFromRemote(_ data: [String: Any]) -> POI? {

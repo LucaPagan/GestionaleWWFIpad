@@ -17,6 +17,7 @@ final class Content {
     var tierRawValue: String
     var data: Data?           // DB: jsonb — stored as serialised JSON
     var fileURL: String?
+    var descriptionKids: String?
     var sortOrder: Int
     var createdAt: Date
     var updatedAt: Date
@@ -38,6 +39,7 @@ final class Content {
         tier: ContentTier = .light,
         data: Data? = nil,
         fileURL: String? = nil,
+        descriptionKids: String? = nil,
         sortOrder: Int = 0,
         fixedID: UUID? = nil
     ) {
@@ -47,6 +49,7 @@ final class Content {
         self.tierRawValue = tier.rawValue
         self.data = data
         self.fileURL = fileURL
+        self.descriptionKids = descriptionKids
         self.sortOrder = sortOrder
         self.createdAt = Date()
         self.updatedAt = Date()
@@ -57,6 +60,7 @@ final class Content {
         if let t = remoteData["type"] as? String { typeRawValue = t }
         if let ti = remoteData["tier"] as? String { tierRawValue = ti }
         fileURL = remoteData["file_url"] as? String
+        descriptionKids = remoteData["description_kids"] as? String
         if let so = remoteData["sort_order"] as? Int { sortOrder = so }
         // jsonb data field is stored as serialised Data if present
         if let jsonObj = remoteData["data"], !(jsonObj is NSNull) {
