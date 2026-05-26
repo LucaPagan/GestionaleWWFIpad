@@ -21,6 +21,12 @@ struct ManagerRootView: View {
                 .tag(0)
 
 
+            GamificationAdminView()
+                .tabItem {
+                    Label("Gamification", systemImage: "rosette")
+                }
+                .tag(1)
+
             EventBuilderListView()
                 .tabItem {
                     Label("Eventi", systemImage: "calendar.badge.clock")

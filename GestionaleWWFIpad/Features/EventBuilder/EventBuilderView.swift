@@ -272,15 +272,13 @@ struct EventBuilderView: View {
         try? context.save()
 
         isSaving = true
-        Task {
+        Task { @MainActor in
             await syncManager.pushAllChanges()
-            await MainActor.run {
-                isSaving = false
-                if case .error(let message) = syncManager.syncState {
-                    errorMessage = message
-                } else {
-                    dismiss()
-                }
+            isSaving = false
+            if case .error(let message) = syncManager.syncState {
+                errorMessage = message
+            } else {
+                dismiss()
             }
         }
     }

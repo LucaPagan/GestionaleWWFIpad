@@ -153,7 +153,7 @@ enum TrailDifficulty: String, Codable, CaseIterable {
 
     var supabaseValue: String { rawValue }
 
-    static func fromSupabase(_ value: String) -> TrailDifficulty? {
+    nonisolated static func fromSupabase(_ value: String) -> TrailDifficulty? {
         TrailDifficulty(rawValue: value)
     }
 }

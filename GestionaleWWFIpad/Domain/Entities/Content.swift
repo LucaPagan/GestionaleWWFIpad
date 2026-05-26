@@ -104,7 +104,7 @@ enum ContentType: String, Codable, CaseIterable {
     case model3d  = "model_3d"
     case audio    = "audio"
 
-    var displayName: String {
+    nonisolated var displayName: String {
         switch self {
         case .text:    return "Testo"
         case .image:   return "Immagine"
@@ -130,7 +130,7 @@ enum ContentTier: String, Codable, CaseIterable {
     case standard = "standard"
     case full     = "full"
 
-    var displayName: String {
+    nonisolated var displayName: String {
         switch self {
         case .light:    return "Essenziale"
         case .standard: return "Standard"
@@ -139,7 +139,7 @@ enum ContentTier: String, Codable, CaseIterable {
     }
 
     /// Estimated size factor for UI display
-    var sizeLabel: String {
+    nonisolated var sizeLabel: String {
         switch self {
         case .light:    return "~5 MB"
         case .standard: return "~25 MB"

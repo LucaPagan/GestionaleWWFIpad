@@ -209,7 +209,7 @@ enum EventCategory: String, Codable, CaseIterable {
 
     var supabaseValue: String { rawValue }
 
-    static func fromSupabase(_ value: String) -> EventCategory? {
+    nonisolated static func fromSupabase(_ value: String) -> EventCategory? {
         EventCategory(rawValue: value)
     }
 }
@@ -235,7 +235,7 @@ enum EventAudience: String, Codable, CaseIterable {
 
     var supabaseValue: String { rawValue }
 
-    static func fromSupabase(_ value: String) -> EventAudience? {
+    nonisolated static func fromSupabase(_ value: String) -> EventAudience? {
         EventAudience(rawValue: value)
     }
 }

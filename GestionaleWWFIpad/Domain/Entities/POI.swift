@@ -158,7 +158,7 @@ enum POIType: String, Codable, CaseIterable {
 
     var supabaseValue: String { rawValue }
 
-    static func fromSupabase(_ value: String) -> POIType? {
+    nonisolated static func fromSupabase(_ value: String) -> POIType? {
         POIType(rawValue: value)
     }
 }

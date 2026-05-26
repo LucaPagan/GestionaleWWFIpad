@@ -12,48 +12,11 @@ final class TranslationService: Sendable {
     
     private init() {}
     
-    /// Translates a text from Italian to a target language.
-    /// Uses MyMemory free API, and falls back to a clean mock system if offline or failed.
+    /// Keeps CRUD flows deterministic. External translation services should run server-side,
+    /// not during admin saves on the iPad.
     func translate(_ text: String, to targetLang: String) async -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
-        
-        let langPair = "it|\(targetLang)"
-        guard let encodedText = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "https://api.mymemory.translated.net/get?q=\(encodedText)&langpair=\(langPair)") else {
-            return fallbackTranslate(trimmed, to: targetLang)
-        }
-        
-        do {
-            let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 5
-            let session = URLSession(configuration: config)
-            
-            let (data, response) = try await session.data(from: url)
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                return fallbackTranslate(trimmed, to: targetLang)
-            }
-            
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                if let responseData = json["responseData"] as? [String: Any],
-                   let translation = responseData["translatedText"] as? String,
-                   !translation.isEmpty,
-                   translation != trimmed {
-                    return translation
-                }
-                
-                if let matches = json["matches"] as? [[String: Any]],
-                   let firstMatch = matches.first,
-                   let translation = firstMatch["translation"] as? String,
-                   !translation.isEmpty,
-                   translation != trimmed {
-                    return translation
-                }
-            }
-        } catch {
-            print("Translation API error: \(error)")
-        }
-        
         return fallbackTranslate(trimmed, to: targetLang)
     }
     

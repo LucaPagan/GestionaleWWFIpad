@@ -1,7 +1,7 @@
 import Foundation
 import SwiftData
 
-struct AdminValidationIssue: Identifiable, Equatable {
+nonisolated struct AdminValidationIssue: Identifiable, Equatable {
     enum Severity {
         case error
         case warning
@@ -12,7 +12,7 @@ struct AdminValidationIssue: Identifiable, Equatable {
     let message: String
 }
 
-struct BundleReadiness: Equatable {
+nonisolated struct BundleReadiness: Equatable {
     let tier: ContentTier
     let isReady: Bool
     let manifestSHA256: String?
@@ -29,7 +29,7 @@ struct BundleReadiness: Equatable {
     }
 }
 
-enum AdminValidationService {
+nonisolated enum AdminValidationService {
     static func trailIssues(trail: Trail, contents: [Content]) -> [AdminValidationIssue] {
         trailIssues(
             name: trail.name,
@@ -116,7 +116,7 @@ enum AdminValidationService {
     static func bundleIssues(for readiness: [BundleReadiness], localUpdatedAt: Date) -> [AdminValidationIssue] {
         var issues: [AdminValidationIssue] = []
         let requiredTiers = Set(ContentTier.allCases)
-        let byTier = Dictionary(uniqueKeysWithValues: readiness.map { ($0.tier, $0) })
+        let byTier = Dictionary(readiness.map { ($0.tier, $0) }, uniquingKeysWith: { first, _ in first })
 
         for tier in requiredTiers {
             guard let package = byTier[tier] else {
@@ -230,7 +230,7 @@ enum AdminValidationService {
 }
 
 extension ContentType {
-    var requiresFileURL: Bool {
+    nonisolated var requiresFileURL: Bool {
         switch self {
         case .text:
             return false
@@ -239,7 +239,7 @@ extension ContentType {
         }
     }
 
-    var defaultMimeType: String {
+    nonisolated var defaultMimeType: String {
         switch self {
         case .text:
             return "application/json"
@@ -254,7 +254,7 @@ extension ContentType {
         }
     }
 
-    var defaultFileExtension: String {
+    nonisolated var defaultFileExtension: String {
         switch self {
         case .text:
             return "json"

@@ -1,7 +1,7 @@
 import SwiftUI
 import SwiftData
 
-struct TrailDraftStep: Identifiable, Equatable {
+nonisolated struct TrailDraftStep: Identifiable, Equatable {
     let id = UUID()
     var poi: POI?
     var instructions: String

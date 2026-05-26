@@ -357,6 +357,7 @@ struct POIEditorView: View {
         }
     }
 
+    @MainActor
     private func processAndUploadMedia(_ items: [PhotosPickerItem], for poi: POI) async {
         isUploading = true
         defer { isUploading = false; selectedMedia = [] }
@@ -401,6 +402,7 @@ struct POIEditorView: View {
         }
     }
 
+    @MainActor
     private func importFile(_ result: Result<[URL], Error>, for poi: POI) async {
         guard case let .success(urls) = result, let url = urls.first else {
             if case let .failure(error) = result {

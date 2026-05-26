@@ -6,6 +6,7 @@
 import Foundation
 import SwiftData
 import Combine
+import Network
 
 enum SyncState: Equatable {
     case idle
@@ -29,23 +30,56 @@ final class SyncManager: ObservableObject {
     @Published var syncState: SyncState = .idle
     @Published var lastSyncDate: Date?
     @Published var pendingChanges: Int = 0
+    @Published var isOnline: Bool = true
 
     private var modelContainer: ModelContainer?
     private let networkClient: NetworkClient
     private let storageService: StorageService
+    private let monitor = NWPathMonitor()
+    private let queue = DispatchQueue(label: "SyncManager.NetworkMonitor")
+    private var syncTask: Task<Void, Never>?
 
-    init(networkClient: NetworkClient = SupabaseConfig.shared, storageService: StorageService = StorageManager.shared) {
-        self.networkClient = networkClient
-        self.storageService = storageService
+    init(networkClient: NetworkClient? = nil, storageService: StorageService? = nil) {
+        self.networkClient = networkClient ?? SupabaseConfig.shared
+        self.storageService = storageService ?? StorageManager.shared
+        
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                let online = path.status == .satisfied
+                self?.isOnline = online
+            }
+        }
+        monitor.start(queue: queue)
     }
 
     func configure(with context: ModelContext) {
         self.modelContainer = context.container
-        updatePendingCount()
+        updatePendingCount(autoSync: false)
+    }
+    
+    func autoSyncIfNeeded() {
+        guard isOnline, pendingChanges > 0 else { return }
+        if case .syncing = syncState { return }
+        
+        syncTask?.cancel()
+        syncTask = Task {
+            await pushAllChanges()
+        }
+    }
+
+    func schedulePushPendingChanges(delay: Duration = .seconds(1)) {
+        guard isOnline else { return }
+        syncTask?.cancel()
+        syncTask = Task {
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            await pushPendingChanges()
+        }
     }
 
     func pushAllChanges() async {
         guard let container = modelContainer else { return }
+        if case .syncing = syncState { return }
         
         do {
             syncState = .syncing(entity: "Dati in background")
@@ -62,8 +96,40 @@ final class SyncManager: ObservableObject {
         }
     }
 
+    func pushPendingChanges() async {
+        guard let container = modelContainer else { return }
+        if case .syncing = syncState { return }
+
+        do {
+            syncState = .syncing(entity: "Invio modifiche")
+
+            let worker = SyncWorker(modelContainer: container, networkClient: networkClient, storageService: storageService)
+            let pushedCount = try await worker.performPush()
+
+            syncState = .success(count: pushedCount)
+            lastSyncDate = Date()
+            updatePendingCount(autoSync: false)
+        } catch {
+            syncState = .error(message: error.localizedDescription)
+        }
+    }
+
+    /// Invia solo le entità gamification con `needsSync` (stesso flusso dei POI, senza pull).
+    func pushGamificationPendingChanges() async throws {
+        guard let container = modelContainer else { return }
+        if case .syncing = syncState { return }
+
+        syncState = .syncing(entity: "Gamification")
+        let worker = SyncWorker(modelContainer: container, networkClient: networkClient, storageService: storageService)
+        let pushedCount = try await worker.performGamificationPush()
+        syncState = .success(count: pushedCount)
+        lastSyncDate = Date()
+        updatePendingCount(autoSync: false)
+    }
+
     func pullLatestData() async {
         guard let container = modelContainer else { return }
+        if case .syncing = syncState { return }
 
         do {
             syncState = .syncing(entity: "Download dati")
@@ -79,7 +145,7 @@ final class SyncManager: ObservableObject {
         }
     }
 
-    func updatePendingCount() {
+    func updatePendingCount(autoSync: Bool = true) {
         guard let container = modelContainer else {
             pendingChanges = 0
             return
@@ -90,13 +156,27 @@ final class SyncManager: ObservableObject {
         let trailsDesc = FetchDescriptor<Trail>(predicate: #Predicate { $0.needsSync == true })
         let eventsDesc = FetchDescriptor<Event>(predicate: #Predicate { $0.needsSync == true })
         let contentsDesc = FetchDescriptor<Content>(predicate: #Predicate { $0.needsSync == true })
-
+        let badgesDesc = FetchDescriptor<GamificationBadge>(predicate: #Predicate { $0.needsSync == true })
+        let speciesDesc = FetchDescriptor<GamificationSpecies>(predicate: #Predicate { $0.needsSync == true })
+        let levelsDesc = FetchDescriptor<GamificationLevel>(predicate: #Predicate { $0.needsSync == true })
+        let rulesDesc = FetchDescriptor<GamificationRule>(predicate: #Predicate { $0.needsSync == true })
+        let campaignsDesc = FetchDescriptor<GamificationCampaign>(predicate: #Predicate { $0.needsSync == true })
+        
         let pCount = (try? context.fetchCount(poisDesc)) ?? 0
         let tCount = (try? context.fetchCount(trailsDesc)) ?? 0
         let eCount = (try? context.fetchCount(eventsDesc)) ?? 0
         let cCount = (try? context.fetchCount(contentsDesc)) ?? 0
+        let gCount = (try? context.fetchCount(badgesDesc)) ?? 0
+            + ((try? context.fetchCount(speciesDesc)) ?? 0)
+            + ((try? context.fetchCount(levelsDesc)) ?? 0)
+            + ((try? context.fetchCount(rulesDesc)) ?? 0)
+            + ((try? context.fetchCount(campaignsDesc)) ?? 0)
 
-        pendingChanges = pCount + tCount + eCount + cCount
+        pendingChanges = pCount + tCount + eCount + cCount + gCount
+        
+        if autoSync && pendingChanges > 0 && isOnline {
+            autoSyncIfNeeded()
+        }
     }
     
     // MARK: - Deletions
@@ -219,6 +299,78 @@ actor SyncWorker: ModelActor {
             event.needsSync = false
             changedCount += 1
         }
+        
+        changedCount += try await performGamificationPush()
+        try? modelContext.save()
+        return changedCount
+    }
+
+    func performGamificationPush() async throws -> Int {
+        var changedCount = 0
+
+        let dirtyBadges = try modelContext.fetch(FetchDescriptor<GamificationBadge>(predicate: #Predicate { $0.needsSync == true }))
+        for badge in dirtyBadges {
+            if let photoData = badge.photoData, !photoData.isEmpty, badge.imageURL == nil || badge.imageURL?.isEmpty == true {
+                badge.imageURL = try await storageService.uploadImage(
+                    data: photoData,
+                    path: "gamification/badges/\(badge.id.uuidString).jpg"
+                )
+            }
+            _ = try await networkClient.upsert(into: "badges", values: badge.toSupabaseParams())
+            badge.needsSync = false
+            badge.updatedAt = Date()
+            changedCount += 1
+        }
+
+        let dirtySpecies = try modelContext.fetch(FetchDescriptor<GamificationSpecies>(predicate: #Predicate { $0.needsSync == true }))
+        for species in dirtySpecies {
+            if let photoData = species.photoData, !photoData.isEmpty, species.imageURL == nil || species.imageURL?.isEmpty == true {
+                species.imageURL = try await storageService.uploadImage(
+                    data: photoData,
+                    path: "gamification/species/\(species.id.uuidString).jpg"
+                )
+            }
+            _ = try await networkClient.upsert(into: "species", values: species.toSupabaseParams())
+            species.needsSync = false
+            species.updatedAt = Date()
+            changedCount += 1
+        }
+
+        let dirtyLevels = try modelContext.fetch(FetchDescriptor<GamificationLevel>(predicate: #Predicate { $0.needsSync == true }))
+        for level in dirtyLevels {
+            if let photoData = level.photoData, !photoData.isEmpty, level.imageURL == nil || level.imageURL?.isEmpty == true {
+                level.imageURL = try await storageService.uploadImage(
+                    data: photoData,
+                    path: "gamification/levels/\(level.id.uuidString).jpg"
+                )
+            }
+            _ = try await networkClient.upsert(into: "gamification_levels", values: level.toSupabaseParams())
+            level.needsSync = false
+            level.updatedAt = Date()
+            changedCount += 1
+        }
+
+        let dirtyRules = try modelContext.fetch(FetchDescriptor<GamificationRule>(predicate: #Predicate { $0.needsSync == true }))
+        for rule in dirtyRules {
+            _ = try await networkClient.upsert(into: "gamification_rules", values: rule.toSupabaseParams())
+            rule.needsSync = false
+            rule.updatedAt = Date()
+            changedCount += 1
+        }
+
+        let dirtyCampaigns = try modelContext.fetch(FetchDescriptor<GamificationCampaign>(predicate: #Predicate { $0.needsSync == true }))
+        for campaign in dirtyCampaigns {
+            if let photoData = campaign.photoData, !photoData.isEmpty, campaign.imageURL == nil || campaign.imageURL?.isEmpty == true {
+                campaign.imageURL = try await storageService.uploadImage(
+                    data: photoData,
+                    path: "gamification/campaigns/\(campaign.id.uuidString).jpg"
+                )
+            }
+            _ = try await networkClient.upsert(into: "gamification_campaigns", values: campaign.toSupabaseParams())
+            campaign.needsSync = false
+            campaign.updatedAt = Date()
+            changedCount += 1
+        }
 
         try? modelContext.save()
         return changedCount
@@ -328,20 +480,25 @@ actor SyncWorker: ModelActor {
     }
 
     private func pushTranslations(table: String, recordId: UUID, fields: [String: String]) async {
-        // Automatically translate from Italian to English, German, and French
         let targetLanguages = ["en", "de", "fr"]
-        for lang in targetLanguages {
-            for (fieldName, text) in fields {
-                let translated = await TranslationService.shared.translate(text, to: lang)
-                let params: [String: Any?] = [
-                    "p_id": UUID().uuidString,
-                    "p_table_name": table,
-                    "p_record_id": recordId.uuidString,
-                    "p_field_name": fieldName,
-                    "p_language_code": lang,
-                    "p_translated_text": translated
-                ]
-                _ = try? await networkClient.rpc("upsert_translation", params: params)
+        let client = networkClient
+        let recordIdString = recordId.uuidString
+        await withTaskGroup(of: Void.self) { group in
+            for lang in targetLanguages {
+                for (fieldName, text) in fields {
+                    group.addTask {
+                        let translated = await TranslationService.shared.translate(text, to: lang)
+                        let params: [String: Any?] = [
+                            "p_id": UUID().uuidString,
+                            "p_table_name": table,
+                            "p_record_id": recordIdString,
+                            "p_field_name": fieldName,
+                            "p_language_code": lang,
+                            "p_translated_text": translated
+                        ]
+                        _ = try? await client.rpc("upsert_translation", params: params)
+                    }
+                }
             }
         }
     }

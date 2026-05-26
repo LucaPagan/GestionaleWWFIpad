@@ -54,20 +54,7 @@ struct ManagerSettingsView: View {
                         }
                     }
 
-                    Button {
-                        Task { await syncManager.pushAllChanges() }
-                    } label: {
-                        Label("Sincronizza ora", systemImage: "arrow.triangle.2.circlepath.circle.fill")
-                            .foregroundColor(Color("WWFGreen"))
-                    }
-                    .disabled(syncManager.syncState == .syncing(entity: ""))
-
-                    Button {
-                        Task { await syncManager.pullLatestData() }
-                    } label: {
-                        Label("Aggiorna dati dal server", systemImage: "arrow.down.circle.fill")
-                            .foregroundColor(Color("WWFGreen"))
-                    }
+                    // Manual sync buttons removed as sync is now handled automatically in the background by SyncManager
                 }
 
                 Section("App") {

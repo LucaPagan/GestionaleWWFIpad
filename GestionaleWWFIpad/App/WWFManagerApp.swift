@@ -9,7 +9,10 @@ struct WWFManagerApp: App {
 
     init() {
         do {
-            let schema = Schema([Trail.self, POI.self, TrailStep.self, Event.self, Content.self])
+            let schema = Schema([
+                Trail.self, POI.self, TrailStep.self, Event.self, Content.self,
+                GamificationBadge.self, GamificationSpecies.self, GamificationLevel.self, GamificationRule.self, GamificationCampaign.self
+            ])
             let config = ModelConfiguration(
                 schema: schema,
                 isStoredInMemoryOnly: false,
@@ -20,7 +23,10 @@ struct WWFManagerApp: App {
             // If migration fails, reset the store and start fresh
             Self.deleteStore()
             do {
-                let schema = Schema([Trail.self, POI.self, TrailStep.self, Event.self, Content.self])
+                let schema = Schema([
+                    Trail.self, POI.self, TrailStep.self, Event.self, Content.self,
+                    GamificationBadge.self, GamificationSpecies.self, GamificationLevel.self, GamificationRule.self, GamificationCampaign.self
+                ])
                 let config = ModelConfiguration(schema: schema)
                 container = try ModelContainer(for: schema, configurations: config)
             } catch {
@@ -51,14 +57,8 @@ struct WWFManagerApp: App {
                 // Try to restore previous session
                 managerSession.restoreSession()
                 
-                // Automatically push any pending offline changes if logged in
-                Task {
-                    if managerSession.isLoggedIn {
-                        await syncManager.pushAllChanges()
-                    } else {
-                        await syncManager.pullLatestData()
-                    }
-                }
+                // Sync is intentionally user-driven. Running a full push/pull while an editor is
+                // saving can make SwiftData contexts contend with each other and crash.
             }
         }
     }

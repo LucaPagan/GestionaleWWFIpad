@@ -3,23 +3,27 @@
 //  GestionaleWWFIpad
 //
 
-import Foundation
 import SwiftData
 
-@ModelActor
-final actor POIRepositoryImpl: POIRepository {
+@MainActor
+final class POIRepositoryImpl: POIRepository {
+    private let modelContext: ModelContext
+
+    init(modelContext: ModelContext) {
+        self.modelContext = modelContext
+    }
     
-    func fetchAll() async throws -> [POI] {
+    func fetchAll() throws -> [POI] {
         let descriptor = FetchDescriptor<POI>()
         return try modelContext.fetch(descriptor)
     }
     
-    func save(_ poi: POI) async throws {
+    func save(_ poi: POI) throws {
         modelContext.insert(poi)
         try modelContext.save()
     }
     
-    func delete(_ poi: POI) async throws {
+    func delete(_ poi: POI) throws {
         modelContext.delete(poi)
         try modelContext.save()
     }

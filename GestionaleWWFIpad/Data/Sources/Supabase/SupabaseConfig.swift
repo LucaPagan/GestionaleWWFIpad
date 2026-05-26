@@ -5,11 +5,15 @@
 
 import Foundation
 import Combine
+import os
 
 protocol NetworkClient: Sendable {
     func rpc(_ functionName: String, params: [String: Any?]) async throws -> [String: Any]?
     func invokeFunction(_ functionName: String, body: [String: Any?]) async throws -> [String: Any]?
     func fetch(from table: String, query: String) async throws -> [[String: Any]]
+    func insert(into table: String, values: [String: Any?]) async throws -> [String: Any]?
+    func upsert(into table: String, values: [String: Any?]) async throws -> [String: Any]?
+    func patch(table: String, id: String, values: [String: Any?]) async throws
     func delete(from table: String, match: [String: String]) async throws
 }
 
@@ -20,7 +24,13 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
     private let projectURL = AppConfig.supabaseURL
     private let anonKey = AppConfig.supabaseAnonKey
     
-    private var session: URLSession = {
+    // MARK: - Thread Safety
+    /// Lock protecting all mutable token/session state to prevent data races (EXC_BAD_ACCESS)
+    private let stateLock = NSLock()
+    /// Guard against concurrent token refresh attempts
+    private var _isRefreshing = false
+    
+    private let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 300
@@ -31,7 +41,7 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
     }()
     
     /// A separate ephemeral session for storage tasks to avoid session-level protocol caching issues
-    private var storageSession: URLSession = {
+    private let storageSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 120
         config.timeoutIntervalForResource = 600
@@ -42,27 +52,60 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
 
     // MARK: - Secure Token Storage (Keychain)
 
+    // MARK: - Thread-safe token storage (protected by stateLock)
+    private var _accessToken: String?
+    private var _refreshToken: String?
+    private var _sessionUser: SupabaseUser?
+
+    /// Thread-safe getter/setter for accessToken
     private var accessToken: String? {
-        didSet {
-            if let token = accessToken {
+        get {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return _accessToken
+        }
+        set {
+            stateLock.lock()
+            _accessToken = newValue
+            stateLock.unlock()
+            // Keychain writes are thread-safe themselves
+            if let token = newValue {
                 KeychainHelper.save(key: "sb_access_token", value: token)
             } else {
                 KeychainHelper.delete(key: "sb_access_token")
             }
         }
     }
+    /// Thread-safe getter/setter for refreshToken
     private var refreshToken: String? {
-        didSet {
-            if let token = refreshToken {
+        get {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return _refreshToken
+        }
+        set {
+            stateLock.lock()
+            _refreshToken = newValue
+            stateLock.unlock()
+            if let token = newValue {
                 KeychainHelper.save(key: "sb_refresh_token", value: token)
             } else {
                 KeychainHelper.delete(key: "sb_refresh_token")
             }
         }
     }
+    /// Thread-safe getter/setter for sessionUser
     private var sessionUser: SupabaseUser? {
-        didSet {
-            if let user = sessionUser {
+        get {
+            stateLock.lock()
+            defer { stateLock.unlock() }
+            return _sessionUser
+        }
+        set {
+            stateLock.lock()
+            _sessionUser = newValue
+            stateLock.unlock()
+            if let user = newValue {
                 KeychainHelper.save(key: "sb_user_id", value: user.id)
                 if let email = user.email {
                     KeychainHelper.save(key: "sb_user_email", value: email)
@@ -80,10 +123,11 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
 
         if let token = KeychainHelper.load(key: "sb_access_token"),
            let id = KeychainHelper.load(key: "sb_user_id") {
-            self.accessToken = token
-            self.refreshToken = KeychainHelper.load(key: "sb_refresh_token")
+            // Direct assignment to backing storage during init (no concurrency yet)
+            self._accessToken = token
+            self._refreshToken = KeychainHelper.load(key: "sb_refresh_token")
             let email = KeychainHelper.load(key: "sb_user_email")
-            self.sessionUser = SupabaseUser(id: id, email: email)
+            self._sessionUser = SupabaseUser(id: id, email: email)
         }
     }
 
@@ -109,7 +153,9 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
     }
 
     func signIn(email: String, password: String) async throws {
-        let url = URL(string: "\(projectURL)/auth/v1/token?grant_type=password")!
+        guard let url = URL(string: "\(projectURL)/auth/v1/token?grant_type=password") else {
+            throw SupabaseError.networkError("URL di autenticazione non valido")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -143,7 +189,7 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
 
     func signOut() async throws {
         if let token = accessToken {
-            let url = URL(string: "\(projectURL)/auth/v1/logout")!
+            guard let url = URL(string: "\(projectURL)/auth/v1/logout") else { return }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -160,12 +206,40 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         return SupabaseSession(accessToken: token, user: user)
     }
 
+    private func tryAcquireRefresh() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if _isRefreshing {
+            return false
+        }
+        _isRefreshing = true
+        return true
+    }
+
+    private func releaseRefresh() {
+        stateLock.lock()
+        _isRefreshing = false
+        stateLock.unlock()
+    }
+
     private func refreshSession() async throws {
+        // Prevent concurrent refresh attempts (data race protection)
+        guard tryAcquireRefresh() else {
+            // Another refresh is already in progress — wait briefly then return
+            try? await Task.sleep(for: .milliseconds(500))
+            return
+        }
+        defer {
+            releaseRefresh()
+        }
+
         guard let rToken = refreshToken else {
             throw SupabaseError.authError("Nessun token di refresh disponibile")
         }
 
-        let url = URL(string: "\(projectURL)/auth/v1/token?grant_type=refresh_token")!
+        guard let url = URL(string: "\(projectURL)/auth/v1/token?grant_type=refresh_token") else {
+            throw SupabaseError.networkError("URL di refresh non valido")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -203,14 +277,6 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
     ) async throws -> (Data, HTTPURLResponse) {
         var mutableRequest = request
         mutableRequest.setValue("close", forHTTPHeaderField: "Connection")
-        
-        let nsRequest = (mutableRequest as NSURLRequest).mutableCopy() as? NSMutableURLRequest
-        if nsRequest?.responds(to: NSSelectorFromString("_setAllowsQUIC:")) == true {
-            nsRequest?.setValue(false, forKey: "allowsQUIC")
-            if let updatedRequest = nsRequest as URLRequest? {
-                mutableRequest = updatedRequest
-            }
-        }
 
         let activeSession = useStorageSession ? storageSession : session
         
@@ -249,7 +315,9 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
     }
 
     func rpc(_ functionName: String, params: [String: Any?]) async throws -> [String: Any]? {
-        let url = URL(string: "\(projectURL)/rest/v1/rpc/\(functionName)")!
+        guard let url = URL(string: "\(projectURL)/rest/v1/rpc/\(functionName)") else {
+            throw SupabaseError.networkError("URL RPC non valido per: \(functionName)")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -263,8 +331,7 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
 
         // Ensure all parameters are sent, using NSNull for nil values 
         // to match the PostgreSQL function signature.
-        let sanitizedParams = params.mapValues { $0 ?? NSNull() }
-        request.httpBody = try JSONSerialization.data(withJSONObject: sanitizedParams)
+        request.httpBody = try SupabaseJSONSanitizer.data(from: params)
 
         let (data, httpResponse) = try await performRequestWithRetry(request)
 
@@ -292,7 +359,7 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
             request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
         }
 
-        request.httpBody = try JSONSerialization.data(withJSONObject: body.mapValues { $0 ?? NSNull() })
+        request.httpBody = try SupabaseJSONSanitizer.data(from: body)
 
         let (data, httpResponse) = try await performRequestWithRetry(request)
 
@@ -329,6 +396,90 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
 
         return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
     }
+
+    func insert(into table: String, values: [String: Any?]) async throws -> [String: Any]? {
+        let urlString = "\(projectURL)/rest/v1/\(table)"
+        guard let url = URL(string: urlString) else {
+            throw SupabaseError.networkError("Invalid URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("return=representation", forHTTPHeaderField: "Prefer")
+        request.setValue(anonKey, forHTTPHeaderField: "apikey")
+
+        if let token = accessToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        request.httpBody = try SupabaseJSONSanitizer.data(from: values)
+        let (data, httpResponse) = try await performRequestWithRetry(request)
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw SupabaseError.apiError("Insert into \(table) failed (\(httpResponse.statusCode)): \(errorBody)")
+        }
+
+        return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]])?.first
+    }
+
+    func upsert(into table: String, values: [String: Any?]) async throws -> [String: Any]? {
+        let urlString = "\(projectURL)/rest/v1/\(table)"
+        guard let url = URL(string: urlString) else {
+            throw SupabaseError.networkError("Invalid URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("resolution=merge-duplicates,return=representation", forHTTPHeaderField: "Prefer")
+        request.setValue(anonKey, forHTTPHeaderField: "apikey")
+
+        if let token = accessToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        request.httpBody = try SupabaseJSONSanitizer.data(from: values)
+        let (data, httpResponse) = try await performRequestWithRetry(request)
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw SupabaseError.apiError("Upsert into \(table) failed (\(httpResponse.statusCode)): \(errorBody)")
+        }
+
+        return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]])?.first
+    }
+
+    func patch(table: String, id: String, values: [String: Any?]) async throws {
+        let urlString = "\(projectURL)/rest/v1/\(table)?id=eq.\(id)"
+        guard let url = URL(string: urlString) else {
+            throw SupabaseError.networkError("Invalid URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
+        request.setValue(anonKey, forHTTPHeaderField: "apikey")
+
+        if let token = accessToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        request.httpBody = try SupabaseJSONSanitizer.data(from: values)
+        let (_, httpResponse) = try await performRequestWithRetry(request)
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw SupabaseError.apiError("Patch \(table) failed (\(httpResponse.statusCode))")
+        }
+    }
     
     func delete(from table: String, match: [String: String]) async throws {
         var queryItems = [String]()
@@ -360,7 +511,12 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
     }
     
     func uploadFile(bucket: String, path: String, data: Data, contentType: String = "image/jpeg") async throws -> String {
-        let url = URL(string: "\(projectURL)/storage/v1/object/\(bucket)/\(path)")!
+        guard !data.isEmpty else {
+            throw SupabaseError.storageError("I dati dell'immagine da caricare sono vuoti.")
+        }
+        guard let url = URL(string: "\(projectURL)/storage/v1/object/\(bucket)/\(path)") else {
+            throw SupabaseError.storageError("URL storage non valido per bucket: \(bucket), path: \(path)")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
@@ -383,15 +539,13 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         func doUpload() async throws -> (Data, HTTPURLResponse) {
             var uploadRequest = request
             uploadRequest.setValue("close", forHTTPHeaderField: "Connection")
-            let nsRequest = (uploadRequest as NSURLRequest).mutableCopy() as? NSMutableURLRequest
-            if nsRequest?.responds(to: NSSelectorFromString("_setAllowsQUIC:")) == true {
-                nsRequest?.setValue(false, forKey: "allowsQUIC")
-                if let updated = nsRequest as URLRequest? { uploadRequest = updated }
-            }
             if let token = accessToken {
                 uploadRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
-            let (d, r) = try await storageSession.upload(for: uploadRequest, from: data)
+            // Make a contiguous copy of the data to avoid EXC_BAD_ACCESS / UnsafeBufferPointer
+            // crashes when data is backed by non-thread-safe buffers (like CGImage/jpegData).
+            let safeData = Data(data)
+            let (d, r) = try await storageSession.upload(for: uploadRequest, from: safeData)
             guard let hr = r as? HTTPURLResponse else { throw SupabaseError.networkError("No HTTP response") }
             return (d, hr)
         }
@@ -415,6 +569,7 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         let publicURL = "\(projectURL)/storage/v1/object/public/\(bucket)/\(path)"
         return publicURL
     }
+
 }
 
 
