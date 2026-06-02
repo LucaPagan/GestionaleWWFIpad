@@ -15,10 +15,14 @@ struct EventBuilderListView: View {
     @State private var showCreateSheet = false
     @State private var selectedEvent: Event? = nil
 
+    private var displayEvents: [Event] {
+        dedupe(events)
+    }
+
     var body: some View {
         NavigationStack {
             Group {
-                if events.isEmpty {
+                if displayEvents.isEmpty {
                     ContentUnavailableView(
                         "Nessun evento",
                         systemImage: "calendar.badge.plus",
@@ -27,7 +31,7 @@ struct EventBuilderListView: View {
                 } else {
                     List {
                         // Eventi futuri
-                        let upcoming = events.filter { $0.isUpcoming }
+                        let upcoming = displayEvents.filter { $0.isUpcoming }
                         if !upcoming.isEmpty {
                             Section("Prossimi eventi") {
                                 ForEach(upcoming) { event in
@@ -42,7 +46,7 @@ struct EventBuilderListView: View {
                         }
 
                         // Eventi passati
-                        let past = events.filter { !$0.isUpcoming }
+                        let past = displayEvents.filter { !$0.isUpcoming }
                         if !past.isEmpty {
                             Section("Eventi passati") {
                                 ForEach(past) { event in
@@ -69,7 +73,7 @@ struct EventBuilderListView: View {
                     }
                 }
                 ToolbarItem(placement: .navigationBarLeading) {
-                    if !events.isEmpty { EditButton() }
+                    if !displayEvents.isEmpty { EditButton() }
                 }
             }
             .sheet(isPresented: $showCreateSheet) {
@@ -87,6 +91,13 @@ struct EventBuilderListView: View {
             for event in eventsToDelete {
                 await syncManager.delete(event, in: context)
             }
+        }
+    }
+
+    private func dedupe(_ source: [Event]) -> [Event] {
+        var seen = Set<UUID>()
+        return source.filter { event in
+            seen.insert(event.id).inserted
         }
     }
 }

@@ -8,7 +8,7 @@ import SwiftData
 
 @Model
 final class GamificationBadge {
-    var id: UUID
+    @Attribute(.unique) var id: UUID
     var title: String
     var badgeDescription: String
     var imageURL: String?
@@ -77,7 +77,7 @@ final class GamificationBadge {
 
 @Model
 final class GamificationSpecies {
-    var id: UUID
+    @Attribute(.unique) var id: UUID
     var name: String
     var scientificName: String
     var speciesDescription: String
@@ -143,7 +143,7 @@ final class GamificationSpecies {
 
 @Model
 final class GamificationLevel {
-    var id: UUID
+    @Attribute(.unique) var id: UUID
     var levelNumber: Int
     var title: String
     var levelDescription: String
@@ -185,7 +185,7 @@ final class GamificationLevel {
 
 @Model
 final class GamificationRule {
-    var id: UUID
+    @Attribute(.unique) var id: UUID
     var title: String
     var ruleDescription: String
     var triggerTypeRawValue: String
@@ -290,7 +290,7 @@ final class GamificationRule {
 
 @Model
 final class GamificationCampaign {
-    var id: UUID
+    @Attribute(.unique) var id: UUID
     var title: String
     var campaignDescription: String
     var imageURL: String?
@@ -514,7 +514,6 @@ extension GamificationBadge {
             "unlock_hint": unlockHint.isEmpty ? nil : unlockHint,
             "sort_order": sortOrder,
             "xp_reward": xpReward,
-            "related_poi_id": relatedPOIId?.uuidString,
             "related_path_id": relatedPathId?.uuidString,
             "related_event_id": relatedEventId?.uuidString,
             "related_species_id": relatedSpeciesId?.uuidString,
@@ -631,7 +630,7 @@ extension GamificationRule {
         if let eaStr = data["ends_at"] as? String, let d = df.date(from: eaStr) { self.endsAt = d; self.hasDateRange = true }
         if let cs = data["cooldown_seconds"] as? Int { self.cooldownSeconds = cs; self.hasCooldown = true }
         
-        if let cond = data["conditions"] as? [String: Any] {
+        if let cond = data["conditions_json"] as? [String: Any] ?? data["conditions"] as? [String: Any] {
             let parsed = gamificationConditionState(
                 from: cond,
                 fallbackPOIId: conditionPOIId,
@@ -658,7 +657,7 @@ extension GamificationRule {
                 self.audioPercent = audioPercent
             }
         }
-        if let rew = data["reward"] as? [String: Any] {
+        if let rew = data["reward_json"] as? [String: Any] ?? data["reward"] as? [String: Any] {
             if let xp = gamificationIntValue(rew["xp"]) { xpReward = xp }
             if let badgeId = gamificationUUID(rew["badge_id"]) { rewardBadgeId = badgeId }
             if let speciesId = gamificationUUID(rew["species_id"]) { rewardSpeciesId = speciesId }
@@ -697,8 +696,8 @@ extension GamificationRule {
             "title": title,
             "description": ruleDescription.isEmpty ? nil : ruleDescription,
             "trigger_type": triggerTypeRawValue,
-            "conditions": condObj,
-            "reward": rewObj,
+            "conditions_json": condObj,
+            "reward_json": rewObj,
             "is_active": isActive,
             "is_hidden": isHidden,
             "is_repeatable": isRepeatable,
@@ -728,7 +727,7 @@ extension GamificationCampaign {
         if let saStr = data["starts_at"] as? String, let d = df.date(from: saStr) { self.startsAt = d }
         if let eaStr = data["ends_at"] as? String, let d = df.date(from: eaStr) { self.endsAt = d }
         
-        if let rules = data["rule_ids"] as? [String],
+        if let rules = data["rules"] as? [String] ?? data["rule_ids"] as? [String],
            let jsonData = try? JSONSerialization.data(withJSONObject: rules),
            let jsonString = String(data: jsonData, encoding: .utf8) {
             self.ruleIdsRaw = jsonString
@@ -745,7 +744,7 @@ extension GamificationCampaign {
             "description": campaignDescription,
             "starts_at": df.string(from: startsAt),
             "ends_at": df.string(from: endsAt),
-            "rule_ids": rulesArr,
+            "rules": rulesArr,
             "image_url": imageURL,
             "is_active": isActive
         ]

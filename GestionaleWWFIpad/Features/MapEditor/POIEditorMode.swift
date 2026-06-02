@@ -40,9 +40,16 @@ struct POIEditorView: View {
     @State private var selectedMedia: [PhotosPickerItem] = []
     @State private var isUploading = false
     @State private var importContentType: ContentType = .audio
-    @State private var importTier: ContentTier = .full
+    @State private var importTier: ContentTier = .light
     @State private var showFileImporter = false
     @State private var errorMessage: String?
+    @State private var showARFileImporter = false
+    @State private var pendingARModelData: Data?
+    @State private var pendingARModelFileName: String?
+    @State private var arModelURL: String = ""
+    @State private var arModelTier: ContentTier = .full
+    @State private var arConfig: ARAnimationConfig = .default
+    @State private var shouldClearARModel = false
     
     private var poiContents: [Content] {
         guard let poi = existingPOI else { return [] }
@@ -161,31 +168,119 @@ struct POIEditorView: View {
                 }
 
                 // MARK: Multimedia & Tiering
+                Section("Realtà Aumentata") {
+                    HStack {
+                        Label("Modello 3D USDZ", systemImage: "arkit")
+                        Spacer()
+                        if !arModelURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(Color("WWFGreen"))
+                        }
+                    }
+
+                    if let fileName = pendingARModelFileName {
+                        Text(fileName)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else if !arModelURL.isEmpty {
+                        Text(arModelURL)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+
+                    Button {
+                        showARFileImporter = true
+                    } label: {
+                        Label(arModelURL.isEmpty ? "Carica modello AR" : "Sostituisci modello AR", systemImage: "square.and.arrow.up")
+                            .foregroundColor(Color("WWFGreen"))
+                    }
+
+                    Picker("Banda modello AR", selection: $arModelTier) {
+                        ForEach(ContentTier.allCases, id: \.self) { tier in
+                            Text(tier.displayName).tag(tier)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if !arModelURL.isEmpty || pendingARModelData != nil {
+                        Button(role: .destructive) {
+                            arModelURL = ""
+                            pendingARModelData = nil
+                            pendingARModelFileName = nil
+                            shouldClearARModel = true
+                        } label: {
+                            Label("Rimuovi modello AR", systemImage: "trash")
+                        }
+                    }
+
+                    Toggle("Rotazione continua", isOn: $arConfig.rotationEnabled)
+                    Toggle("Fluttuazione verticale", isOn: $arConfig.floatingEnabled)
+                    Toggle("Pulsazione scala", isOn: $arConfig.pulseEnabled)
+
+                    VStack(alignment: .leading) {
+                        Text("Velocità: \(arConfig.speed, specifier: "%.1f")x")
+                            .font(.caption)
+                        Slider(value: $arConfig.speed, in: 0.2...3.0, step: 0.1)
+                    }
+
+                    VStack(alignment: .leading) {
+                        Text("Ampiezza fluttuazione: \(Int(arConfig.floatAmplitude * 100)) cm")
+                            .font(.caption)
+                        Slider(value: $arConfig.floatAmplitude, in: 0.02...0.25, step: 0.01)
+                    }
+
+                    VStack(alignment: .leading) {
+                        Text("Scala pulsazione: \(arConfig.pulseScale, specifier: "%.2f")x")
+                            .font(.caption)
+                        Slider(value: $arConfig.pulseScale, in: 1.01...1.3, step: 0.01)
+                    }
+                }
+                .fileImporter(
+                    isPresented: $showARFileImporter,
+                    allowedContentTypes: [UTType(filenameExtension: "usdz") ?? .data],
+                    allowsMultipleSelection: false
+                ) { result in
+                    importARModel(result)
+                }
+
                 if let poi = existingPOI {
                     Section("Contenuti Multimediali (Tiered)") {
                         ForEach(poiContents) { content in
-                            HStack {
-                                Image(systemName: content.contentType.icon)
-                                    .foregroundColor(Color("WWFGreen"))
-                                VStack(alignment: .leading) {
-                                    Text(content.contentType.displayName)
-                                        .font(.subheadline)
-                                    Text("Tier: \(content.tier.displayName)")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Image(systemName: content.contentType.icon)
+                                        .foregroundColor(Color("WWFGreen"))
+                                    VStack(alignment: .leading) {
+                                        Text(content.contentType.displayName)
+                                            .font(.subheadline)
+                                        Text(content.fileURL ?? "Contenuto locale")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    Spacer()
+                                    if content.needsSync {
+                                        Image(systemName: "icloud.and.arrow.up")
+                                            .foregroundColor(.orange)
+                                    }
                                 }
-                                Spacer()
-                                if content.needsSync {
-                                    Image(systemName: "icloud.and.arrow.up")
-                                        .foregroundColor(.orange)
+
+                                Picker("Banda contenuto", selection: tierBinding(for: content)) {
+                                    ForEach(ContentTier.allCases, id: \.self) { tier in
+                                        Text(tier.displayName).tag(tier)
+                                    }
                                 }
+                                .pickerStyle(.segmented)
                             }
                         }
                         
                         if isUploading {
                             ProgressView("Caricamento e classificazione...")
                         } else {
-                            Picker("Tier nuovo contenuto", selection: $importTier) {
+                            Picker("Banda nuovo contenuto", selection: $importTier) {
                                 ForEach(ContentTier.allCases, id: \.self) { tier in
                                     Text(tier.displayName).tag(tier)
                                 }
@@ -270,8 +365,10 @@ struct POIEditorView: View {
                     Button("Annulla") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Salva") { savePOI() }
-                        .disabled(!isFormValid)
+                    Button("Salva") {
+                        Task { await savePOI() }
+                    }
+                    .disabled(!isFormValid || isUploading)
                         .fontWeight(.semibold)
                 }
             }
@@ -311,6 +408,22 @@ struct POIEditorView: View {
 
     // MARK: - Helpers
 
+    private func tierBinding(for content: Content) -> Binding<ContentTier> {
+        Binding(
+            get: { content.tier },
+            set: { newTier in
+                guard content.tier != newTier else { return }
+                content.tier = newTier
+                content.needsSync = true
+                content.updatedAt = Date()
+                try? modelContext.save()
+                Task {
+                    await SyncManager.shared.pushAllChanges()
+                }
+            }
+        )
+    }
+
     private func loadExistingData() {
         guard let poi = existingPOI else { return }
         name = poi.name
@@ -320,9 +433,14 @@ struct POIEditorView: View {
         type = poi.type
         photoData = poi.photoData
         isStartPoint = poi.isStartPoint
+        arModelURL = poi.arModelURL ?? ""
+        arModelTier = poi.arModelTier
+        arConfig = ARAnimationConfig.decode(from: poi.arAnimationConfig)
+        shouldClearARModel = false
     }
 
-    private func savePOI() {
+    @MainActor
+    private func savePOI() async {
         if !validationIssues.isEmpty {
             errorMessage = validationIssues.map(\.message).joined(separator: "\n")
             return
@@ -339,8 +457,17 @@ struct POIEditorView: View {
                 photoData: photoData,
                 isStartPoint: isStartPoint,
                 descriptionKids: descriptionKids.isEmpty ? nil : descriptionKids,
-                descriptionEasyRead: descriptionEasyRead.isEmpty ? nil : descriptionEasyRead
+                descriptionEasyRead: descriptionEasyRead.isEmpty ? nil : descriptionEasyRead,
+                arModelURL: arModelURL.isEmpty ? nil : arModelURL,
+                arAnimationConfig: arConfig.jsonString,
+                arModelTier: arModelTier
             )
+            do {
+                try await uploadPendingARModelIfNeeded(for: poi)
+            } catch {
+                errorMessage = "Upload modello AR non riuscito: \(error.localizedDescription)"
+                return
+            }
             poi.needsSync = true
             onSave(poi)
         case .edit(let poi):
@@ -351,10 +478,78 @@ struct POIEditorView: View {
             poi.type = type
             poi.photoData = photoData
             poi.isStartPoint = isStartPoint
+            poi.arModelURL = arModelURL.isEmpty ? nil : arModelURL
+            poi.arAnimationConfig = arConfig.jsonString
+            poi.arModelTier = arModelTier
+            poi.shouldClearARModel = shouldClearARModel && pendingARModelData == nil
+            do {
+                try await uploadPendingARModelIfNeeded(for: poi)
+            } catch {
+                errorMessage = "Upload modello AR non riuscito: \(error.localizedDescription)"
+                return
+            }
             poi.needsSync = true
             poi.updatedAt = Date()
             onSave(poi)
         }
+    }
+
+    private func importARModel(_ result: Result<[URL], Error>) {
+        guard case let .success(urls) = result, let url = urls.first else {
+            if case let .failure(error) = result {
+                errorMessage = "Import modello AR non riuscito: \(error.localizedDescription)"
+            }
+            return
+        }
+
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if scoped { url.stopAccessingSecurityScopedResource() }
+        }
+
+        do {
+            guard url.pathExtension.lowercased() == "usdz" else {
+                errorMessage = "Seleziona un file in formato .usdz."
+                return
+            }
+            pendingARModelData = try Data(contentsOf: url)
+            pendingARModelFileName = url.lastPathComponent
+        } catch {
+            errorMessage = "Lettura modello AR non riuscita: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func uploadPendingARModelIfNeeded(for poi: POI) async throws {
+        guard let data = pendingARModelData else { return }
+        let fileName = pendingARModelFileName ?? "\(UUID().uuidString).usdz"
+
+        isUploading = true
+        defer { isUploading = false }
+
+        let safeFileName = sanitizedARFileName(fileName)
+        poi.arModelTier = arModelTier
+        let path = "pois/\(poi.id.uuidString)/\(arModelTier.rawValue)/ar/\(safeFileName)"
+        let remoteURL = try await StorageManager.shared.upload(
+            data: data,
+            path: path,
+            bucket: "poi-multimedia",
+            contentType: "model/vnd.usdz+zip"
+        )
+        poi.arModelURL = remoteURL
+        poi.arAnimationConfig = arConfig.jsonString
+        poi.shouldClearARModel = false
+        pendingARModelData = nil
+        pendingARModelFileName = nil
+        shouldClearARModel = false
+        arModelURL = remoteURL
+    }
+
+    private func sanitizedARFileName(_ fileName: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_"))
+        let sanitized = fileName.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        let result = String(sanitized)
+        return result.lowercased().hasSuffix(".usdz") ? result : "\(result).usdz"
     }
 
     @MainActor
@@ -366,8 +561,7 @@ struct POIEditorView: View {
             guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
             let contentType: ContentType = item.supportedContentTypes.contains(.video) ? .video : .image
             
-            let classifiedTier = MediaClassificationService.shared.classify(type: contentType, sizeInBytes: data.count)
-            let tier = importTier.rawValue == ContentTier.full.rawValue ? classifiedTier : importTier
+            let tier = importTier
             
             let ext = contentType == .video ? "mp4" : "jpg"
             let fileName = "\(UUID().uuidString).\(ext)"

@@ -74,7 +74,9 @@ struct EventBuilderView: View {
                         .fontWeight(.semibold)
                 }
             }
-            .onAppear { loadExistingData() }
+            .onAppear {
+                loadExistingData()
+            }
             .alert("Evento non valido", isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
@@ -170,20 +172,23 @@ struct EventBuilderView: View {
         dedupe(allTrails).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    var startPointPOIs: [POI] {
-        dedupedPOIs.filter { $0.isStartPoint }
+    private var eventLocationPOIs: [POI] {
+        dedupedPOIs
     }
 
     private var locationSection: some View {
         Section {
-            if startPointPOIs.isEmpty {
-                Label("Nessun punto di partenza disponibile. Crea un POI e attiva 'Punto di partenza' nell'editor mappa.", systemImage: "exclamationmark.triangle")
+            if eventLocationPOIs.isEmpty {
+                Label("Nessun POI disponibile. Crea un POI nell'editor mappa per collegarlo all'evento.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
                 Picker("Luogo dell'evento", selection: $selectedPOIId) {
                     Text("Nessun luogo specifico").tag(UUID?.none)
-                    ForEach(startPointPOIs, id: \.id) { poi in
+                    if let selectedPOIId, !eventLocationPOIs.contains(where: { $0.id == selectedPOIId }) {
+                        Text("Luogo non disponibile").tag(Optional(selectedPOIId))
+                    }
+                    ForEach(eventLocationPOIs, id: \.id) { poi in
                         Label(poi.name, systemImage: poi.type.icon).tag(Optional(poi.id))
                     }
                 }
@@ -197,6 +202,9 @@ struct EventBuilderView: View {
         Section {
             Picker("Percorso", selection: $selectedTrailId) {
                 Text("Nessun percorso").tag(UUID?.none)
+                if let selectedTrailId, !dedupedTrails.contains(where: { $0.id == selectedTrailId }) {
+                    Text("Percorso non disponibile").tag(Optional(selectedTrailId))
+                }
                 ForEach(dedupedTrails, id: \.id) { trail in
                     Text(trail.name).tag(Optional(trail.id))
                 }
@@ -259,7 +267,7 @@ struct EventBuilderView: View {
 
         let t = event ?? Event(name: "", description: "")
         t.name = name; t.eventDescription = description; t.category = category
-        t.isActive = isActive; t.date = eventDate; t.timeStart = startTime; t.timeEnd = endTime
+        t.isActive = isActive; t.date = Calendar.current.startOfDay(for: eventDate); t.timeStart = startTime; t.timeEnd = endTime
         t.maxParticipants = maxParticipants > 0 ? maxParticipants : nil
         t.organizerName = organizerName.isEmpty ? nil : organizerName
         t.contactInfo = contactInfo.isEmpty ? nil : contactInfo
@@ -269,7 +277,13 @@ struct EventBuilderView: View {
         t.needsSync = true
         t.updatedAt = Date()
         if event == nil { context.insert(t) }
-        try? context.save()
+
+        do {
+            try context.save()
+        } catch {
+            errorMessage = "Errore durante il salvataggio locale: \(error.localizedDescription)"
+            return
+        }
 
         isSaving = true
         Task { @MainActor in

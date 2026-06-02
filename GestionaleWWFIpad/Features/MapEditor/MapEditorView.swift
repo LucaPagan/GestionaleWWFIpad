@@ -46,6 +46,8 @@ struct MapEditorView: View {
     
     // Path Tracing State
     @State private var tbTracingStepId: UUID? = nil
+    @State private var tbTracingStartPOIId: UUID? = nil
+    @State private var tbTracingEndPOIId: UUID? = nil
     @State private var tbIsTracing: Bool = false
 
     var body: some View {
@@ -92,12 +94,16 @@ struct MapEditorView: View {
                                 }
                             },
                             isTracingMode: tbIsTracing,
+                            tracingStartPOIId: tbTracingStartPOIId,
+                            tracingEndPOIId: tbTracingEndPOIId,
                             onPathCaptured: { encodedPath in
                                 if let stepId = tbTracingStepId,
                                    let index = tbSteps.firstIndex(where: { $0.id == stepId }) {
                                     tbSteps[index].pathGeometry = encodedPath
                                     tbIsTracing = false
                                     tbTracingStepId = nil
+                                    tbTracingStartPOIId = nil
+                                    tbTracingEndPOIId = nil
                                 }
                             }
                         )
@@ -181,8 +187,10 @@ struct MapEditorView: View {
         // Aggiungiamo un'animazione globale quando cambia la modalità
         .animation(.easeInOut(duration: 0.3), value: mapMode)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TriggerPathTracing"))) { note in
-            if let id = note.object as? UUID {
+            if let id = note.object as? UUID, let index = tbSteps.firstIndex(where: { $0.id == id }) {
                 tbTracingStepId = id
+                tbTracingEndPOIId = tbSteps[index].poi?.id
+                tbTracingStartPOIId = index == 0 ? tbSelectedStartPOI?.id : tbSteps[index - 1].poi?.id
                 withAnimation {
                     tbIsTracing = true
                 }
@@ -358,63 +366,97 @@ struct MapEditorView: View {
         mapMode = .defaultMode
     }
 
-    private func saveTrail() {
+        private func saveTrail() {
         let issues = currentTrailIssues
         if issues.contains(where: { $0.severity == .error }) {
             adminErrorMessage = issues.map(\.message).joined(separator: "\n")
             return
         }
 
+        print("DEBUG: saveTrail started")
         tbIsSyncing = true
-        let target = mapMode.trail ?? Trail(name: "", description: "")
-        target.name = tbName
-        target.trailDescription = tbDescription
-        target.difficulty = tbDifficulty
-        target.estimatedMinutes = tbEstimatedMinutes
-        target.isActive = tbIsActive
-        target.targetAge = tbTargetAge
-        target.descriptionKids = tbDescriptionKids
-        target.descriptionEasyRead = tbDescriptionEasyRead
-        target.startPOIId = tbSelectedStartPOI?.id
-        target.needsSync = true
-        target.updatedAt = Date()
+        
+        Task { @MainActor in
+            // Lasciamo un istante al Main Thread per aggiornare la UI e mostrare il ProgressView
+            try? await Task.sleep(for: .milliseconds(100))
+            
+            print("DEBUG: Starting SwiftData updates")
+            let target = mapMode.trail ?? Trail(name: "", description: "")
+            target.name = tbName
+            target.trailDescription = tbDescription
+            target.difficulty = tbDifficulty
+            target.estimatedMinutes = tbEstimatedMinutes
+            target.isActive = tbIsActive
+            target.targetAge = tbTargetAge
+            target.descriptionKids = tbDescriptionKids
+            target.descriptionEasyRead = tbDescriptionEasyRead
+            target.startPOIId = tbSelectedStartPOI?.id
+            target.needsSync = true
+            target.updatedAt = Date()
 
-        target.steps.forEach { context.delete($0) }
-        target.steps = tbSteps.enumerated().map { i, draft in
-            let s = TrailStep(
-                stepOrder: i,
-                directionHint: draft.instructions,
-                distanceMeters: draft.distanceMeters,
-                estimatedMinutes: draft.estimatedMinutes,
-                pathGeometry: draft.pathGeometry,
-                poi: draft.poi
-            )
-            context.insert(s)
-            return s
-        }
-
-        if mapMode.trail == nil { context.insert(target) }
-        try? context.save()
-
-        Task {
-            await syncManager.pushAllChanges()
-            await MainActor.run {
-                tbIsSyncing = false
-                if case .error(let message) = syncManager.syncState {
-                    adminErrorMessage = message
+            // Safely update existing steps to prevent SwiftData relationship thrashing/deadlocks
+            for (i, draft) in tbSteps.enumerated() {
+                if i < target.steps.count {
+                    let s = target.steps[i]
+                    s.stepOrder = i
+                    s.directionHint = draft.instructions
+                    s.distanceMeters = draft.distanceMeters
+                    s.estimatedMinutes = draft.estimatedMinutes
+                    s.pathGeometry = draft.pathGeometry
+                    s.poi = draft.poi
                 } else {
-                    closeTrailBuilder()
+                    let s = TrailStep(
+                        stepOrder: i,
+                        directionHint: draft.instructions,
+                        distanceMeters: draft.distanceMeters,
+                        estimatedMinutes: draft.estimatedMinutes,
+                        pathGeometry: draft.pathGeometry,
+                        poi: draft.poi
+                    )
+                    context.insert(s)
+                    target.steps.append(s)
                 }
+            }
+            
+            if target.steps.count > tbSteps.count {
+                let excess = Array(target.steps[tbSteps.count...])
+                for s in excess {
+                    context.delete(s)
+                }
+                target.steps.removeLast(target.steps.count - tbSteps.count)
+            }
+
+            if mapMode.trail == nil { context.insert(target) }
+            
+            print("DEBUG: context.save() called")
+            do {
+                try context.save()
+                print("DEBUG: context.save() finished")
+            } catch {
+                print("DEBUG: context.save() FAILED with error: \(error)")
+            }
+
+            // Give SwiftData's persistent store a moment to write the WAL before the background context fetches it.
+            try? await Task.sleep(for: .milliseconds(500))
+            
+            print("DEBUG: About to call syncManager.pushAllChanges()")
+            await syncManager.pushAllChanges()
+            print("DEBUG: Returned from syncManager.pushAllChanges()")
+            
+            tbIsSyncing = false
+            if case .error(let message) = syncManager.syncState {
+                adminErrorMessage = message
+            } else {
+                closeTrailBuilder()
             }
         }
     }
-
     // MARK: - POI Logic
 
     private func handleSavePOI(_ poi: POI) {
         let isNew = !allPOIs.contains(where: { $0.id == poi.id })
         if isNew { context.insert(poi) }
-        try? context.save()
+        print("DEBUG: context.save() called"); try? context.save(); print("DEBUG: context.save() finished")
 
         Task {
             await syncManager.pushAllChanges()

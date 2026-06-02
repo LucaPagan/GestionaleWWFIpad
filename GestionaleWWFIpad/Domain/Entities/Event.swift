@@ -9,7 +9,7 @@ import SwiftUI
 
 @Model
 final class Event {
-    var id: UUID
+    @Attribute(.unique) var id: UUID
     var name: String
     var eventDescription: String
     var categoryRawValue: String
@@ -120,45 +120,62 @@ final class Event {
         if let n = data["name"] as? String { name = n }
         if let d = data["description"] as? String { eventDescription = d }
         if let cat = data["category"] as? String { categoryRawValue = cat }
+        if let remoteDate = Self.dateOnly(from: data["date"]) { date = remoteDate }
+        if let remoteStart = Self.timeOnly(from: data["time_start"]) { timeStart = remoteStart }
+        if let remoteEnd = Self.timeOnly(from: data["time_end"]) { timeEnd = remoteEnd }
         if let active = data["is_active"] as? Bool { isActive = active }
-        maxParticipants = data["max_participants"] as? Int
-        contactInfo = data["contact_info"] as? String
-        requirements = data["requirements"] as? String
+        maxParticipants = Self.intValue(data["max_participants"])
+        contactInfo = Self.stringValue(data["contact_info"])
+        requirements = Self.stringValue(data["requirements"])
         if let ta = data["target_audience"] as? String { targetAudienceRawValue = ta }
-        if let p = data["price"] as? Double { price = p }
-        imageURL = data["image_url"] as? String
-        organizerName = data["organizer_name"] as? String
+        if let p = Self.doubleValue(data["price"]) { price = p }
+        imageURL = Self.stringValue(data["image_url"])
+        organizerName = Self.stringValue(data["organizer_name"])
         needsSync = false
     }
-}
 
-extension Event {
-    func toSupabaseParams() -> [String: Any?] {
-        let dateFmt = DateFormatter()
-        dateFmt.dateFormat = "yyyy-MM-dd"
+    nonisolated private static func stringValue(_ value: Any?) -> String? {
+        guard let value, !(value is NSNull) else { return nil }
+        return value as? String
+    }
 
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "HH:mm"
+    nonisolated private static func intValue(_ value: Any?) -> Int? {
+        guard let value, !(value is NSNull) else { return nil }
+        if let int = value as? Int { return int }
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String { return Int(string) }
+        return nil
+    }
 
-        return [
-            "p_id": id.uuidString,
-            "p_name": name,
-            "p_description": eventDescription,
-            "p_category": categoryRawValue,
-            "p_date": dateFmt.string(from: date),
-            "p_time_start": timeFmt.string(from: timeStart),
-            "p_time_end": timeFmt.string(from: timeEnd),
-            "p_max_participants": maxParticipants,
-            "p_contact_info": contactInfo,
-            "p_requirements": requirements,
-            "p_target_audience": targetAudienceRawValue,
-            "p_price": price,
-            "p_image_url": imageURL,
-            "p_is_active": isActive,
-            "p_path_id": trail?.id.uuidString,
-            "p_event_poi_id": eventPOI?.id.uuidString,
-            "p_organizer_name": organizerName
-        ]
+    nonisolated private static func doubleValue(_ value: Any?) -> Double? {
+        guard let value, !(value is NSNull) else { return nil }
+        if let double = value as? Double { return double }
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String { return Double(string) }
+        return nil
+    }
+
+    nonisolated private static func dateOnly(from value: Any?) -> Date? {
+        guard let string = stringValue(value) else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = Calendar.current.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: string)
+    }
+
+    nonisolated private static func timeOnly(from value: Any?) -> Date? {
+        guard let string = stringValue(value) else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = Calendar.current.timeZone
+        for format in ["HH:mm:ss", "HH:mm"] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: string) { return date }
+        }
+        return nil
     }
 }
 
@@ -190,8 +207,8 @@ enum EventCategory: String, Codable, CaseIterable {
         case .workshop:     return "hammer.fill"
         case .family:       return "figure.and.child.holdinghands"
         case .photography:  return "camera.fill"
-        case .scientific:   return "flask.fill"
-        case .other:        return "calendar.badge.clock"
+        case .other:        return "calendar"
+        case .scientific:   return "science"
         }
     }
 

@@ -9,7 +9,7 @@ import SwiftUI
 
 @Model
 final class Trail {
-    var id: UUID
+    @Attribute(.unique) var id: UUID
     var name: String
     var trailDescription: String
     var isActive: Bool
@@ -87,38 +87,6 @@ final class Trail {
         descriptionKids = data["description_kids"] as? String
         descriptionEasyRead = data["description_easy_read"] as? String
         needsSync = false
-    }
-}
-
-extension Trail {
-    func toSupabaseParams() -> [String: Any?] {
-        return [
-            "p_id": id.uuidString,
-            "p_name": name,
-            "p_description": trailDescription,
-            "p_is_active": isActive,
-            "p_difficulty": difficultyRawValue,
-            "p_estimated_minutes": estimatedMinutes,
-            "p_cover_image_url": coverImageURL,
-            "p_start_poi_id": startPOIId?.uuidString,
-            "p_target_age": targetAge,
-            "p_description_kids": descriptionKids,
-            "p_description_easy_read": descriptionEasyRead
-        ]
-    }
-
-    func stepsToJSON() -> [[String: Any?]] {
-        sortedSteps.map { step in
-            [
-                "id": step.id.uuidString,
-                "poi_id": step.poi?.id.uuidString,
-                "step_order": step.stepOrder,
-                "direction_hint": step.directionHint,
-                "distance_meters": step.distanceMeters,
-                "estimated_minutes": step.estimatedMinutes,
-                "path_geometry": step.pathGeometry
-            ]
-        }
     }
 }
 

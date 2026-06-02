@@ -11,7 +11,7 @@ import SwiftData
 
 @Model
 final class Content {
-    var id: UUID
+    @Attribute(.unique) var id: UUID
     var poiId: UUID
     var typeRawValue: String
     var tierRawValue: String
@@ -76,25 +76,6 @@ final class Content {
     }
 }
 
-extension Content {
-    func toSupabaseParams() -> [String: Any?] {
-        var jsonDict: [String: Any]? = nil
-        if let d = data {
-            jsonDict = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
-        }
-        
-        return [
-            "p_id": id.uuidString,
-            "p_poi_id": poiId.uuidString,
-            "p_type": typeRawValue,
-            "p_tier": tierRawValue,
-            "p_data": jsonDict,
-            "p_file_url": fileURL,
-            "p_sort_order": sortOrder
-        ]
-    }
-}
-
 // MARK: - Content Enums (mirror Supabase ENUMs)
 
 enum ContentType: String, Codable, CaseIterable {
@@ -145,5 +126,17 @@ enum ContentTier: String, Codable, CaseIterable {
         case .standard: return "~25 MB"
         case .full:     return "~100 MB"
         }
+    }
+
+    nonisolated var rank: Int {
+        switch self {
+        case .light: return 0
+        case .standard: return 1
+        case .full: return 2
+        }
+    }
+
+    nonisolated func includes(_ other: ContentTier) -> Bool {
+        rank >= other.rank
     }
 }

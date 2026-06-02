@@ -17,7 +17,7 @@ import CoreLocation
 @Model
 final class TrailStep {
     // MARK: - Primary Key
-    var id: UUID
+    @Attribute(.unique) var id: UUID
 
     // MARK: - Core Fields (mirror Supabase)
     var stepOrder: Int                     // DB: step_order (CHECK >= 0)

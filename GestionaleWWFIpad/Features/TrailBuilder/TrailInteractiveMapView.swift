@@ -15,6 +15,8 @@ struct TrailInteractiveMapView: UIViewRepresentable {
     
     // Path Tracing
     var isTracingMode: Bool = false
+    var tracingStartPOIId: UUID? = nil
+    var tracingEndPOIId: UUID? = nil
     var onPathCaptured: (String) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
@@ -173,19 +175,37 @@ struct TrailInteractiveMapView: UIViewRepresentable {
                 let stepLayer = CAShapeLayer()
                 stepLayer.name = "StepPath"
                 stepLayer.path = stepPath.cgPath
-                stepLayer.strokeColor = UIColor(Color("WWFGreen")).withAlphaComponent(0.8).cgColor
-                stepLayer.lineWidth = 4.0 / currentScale
+                stepLayer.strokeColor = UIColor(Color("WWFGreen")).withAlphaComponent(0.58).cgColor
+                stepLayer.lineWidth = 3.2 / currentScale
                 stepLayer.fillColor = nil
                 stepLayer.lineJoin = .round
                 stepLayer.lineCap = .round
+                stepLayer.lineDashPattern = [
+                    NSNumber(value: Double(9 / currentScale)),
+                    NSNumber(value: Double(8 / currentScale))
+                ]
+                stepLayer.shadowColor = UIColor(Color("WWFGreen")).cgColor
+                stepLayer.shadowRadius = 3 / currentScale
+                stepLayer.shadowOpacity = 0.18
+                stepLayer.shadowOffset = .zero
                 container.layer.insertSublayer(stepLayer, at: 1) // Below markers
+
+                let glowLayer = CAShapeLayer()
+                glowLayer.name = "StepPath"
+                glowLayer.path = stepPath.cgPath
+                glowLayer.fillColor = nil
+                glowLayer.strokeColor = UIColor(Color("WWFGreen")).withAlphaComponent(0.13).cgColor
+                glowLayer.lineWidth = 9 / currentScale
+                glowLayer.lineJoin = .round
+                glowLayer.lineCap = .round
+                container.layer.insertSublayer(glowLayer, below: stepLayer)
             }
 
             // 2. Draw Markers
-            let targetScreenDiameter: CGFloat = 40
+            let targetScreenDiameter: CGFloat = 44
             let markerDiameter = targetScreenDiameter / currentScale
 
-            var positions: [(poi: POI, center: CGPoint)] = parent.allPOIs.map { poi in
+            let positions: [(poi: POI, center: CGPoint)] = parent.allPOIs.map { poi in
                 let cx = poi.x * imageSize.width
                 let cy = poi.y * imageSize.height
                 return (poi, CGPoint(x: cx, y: cy))
@@ -195,13 +215,14 @@ struct TrailInteractiveMapView: UIViewRepresentable {
                 .filter { $0 is TrailPOIMarkerView }
                 .forEach { $0.removeFromSuperview() }
 
-            for (index, entry) in positions.enumerated() {
+            for entry in positions {
                 let poi = entry.poi
                 let center = entry.center
                 
                 // Highlight if it's in the steps or explicitly selected
                 let stepIndex = parent.trailSteps.firstIndex(where: { $0.poi?.id == poi.id })
-                let isSelected = stepIndex != nil || poi.id == parent.selectedPOIId
+                let isTracingActivePOI = parent.isTracingMode && (poi.id == parent.tracingStartPOIId || poi.id == parent.tracingEndPOIId)
+                let isSelected = parent.isTracingMode ? isTracingActivePOI : (stepIndex != nil || poi.id == parent.selectedPOIId)
 
                 let markerView = TrailPOIMarkerView(
                     poi: poi,
@@ -212,27 +233,31 @@ struct TrailInteractiveMapView: UIViewRepresentable {
                     labelAbove: false // Simplified for trail builder
                 )
 
-                let labelHeight: CGFloat = 18 / currentScale
-                let labelGap: CGFloat = 4 / currentScale
+                let markerHeight = markerDiameter * 1.34
+                let labelHeight: CGFloat = 20 / currentScale
+                let labelGap: CGFloat = 5 / currentScale
                 let totalW = max(markerDiameter * 3, 80 / currentScale)
-                let totalH = markerDiameter + labelGap + labelHeight
+                let totalH = markerHeight + labelGap + labelHeight
 
                 markerView.frame = CGRect(
                     x: center.x - totalW / 2,
-                    y: center.y - markerDiameter / 2,
+                    y: center.y - markerHeight,
                     width: totalW,
                     height: totalH
                 )
 
-                markerView.onTap = { [weak self] in
-                    self?.parent.onTapPOI(poi)
+                markerView.isUserInteractionEnabled = !parent.isTracingMode
+                if !parent.isTracingMode {
+                    markerView.onTap = { [weak self] in
+                        self?.parent.onTapPOI(poi)
+                    }
+                    
+                    // Add drag interaction only outside path tracing. In tracing mode the map
+                    // must behave like a freehand canvas, even when starting near a POI.
+                    let drag = UIDragInteraction(delegate: self)
+                    markerView.addInteraction(drag)
+                    markerView.accessibilityIdentifier = poi.id.uuidString
                 }
-                
-                // Add drag interaction
-                let drag = UIDragInteraction(delegate: self)
-                markerView.addInteraction(drag)
-                // Store POI UUID for drag session
-                markerView.accessibilityIdentifier = poi.id.uuidString
 
                 container.addSubview(markerView)
             }
@@ -260,6 +285,7 @@ struct TrailInteractiveMapView: UIViewRepresentable {
         }
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            guard !parent.isTracingMode else { return }
             guard let imageView = imageView else { return }
             let location = gesture.location(in: imageView)
             let normX = location.x / imageView.frame.width
@@ -268,7 +294,16 @@ struct TrailInteractiveMapView: UIViewRepresentable {
             parent.onTapMap(CGPoint(x: normX, y: normY))
         }
 
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            if parent.isTracingMode {
+                return gestureRecognizer === panGesture
+            }
+            return true
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            parent.isTracingMode
+        }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer) -> Bool {
             if gestureRecognizer === tapGesture, other is UIPanGestureRecognizer { return true }
@@ -276,7 +311,7 @@ struct TrailInteractiveMapView: UIViewRepresentable {
         }
         
         @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
-            guard parent.isTracingMode, let container = containerView, let imageView = imageView else { return }
+            guard parent.isTracingMode, let imageView = imageView else { return }
             
             let location = gesture.location(in: imageView)
             let imageSize = imageView.frame.size
@@ -348,6 +383,7 @@ struct TrailInteractiveMapView: UIViewRepresentable {
                     ])
                 }
                 panGesture?.isEnabled = true
+                tapGesture?.isEnabled = false
                 // Disable scrolling during tracing
                 if let scrollView = container as? UIScrollView {
                     scrollView.isScrollEnabled = false
@@ -356,6 +392,7 @@ struct TrailInteractiveMapView: UIViewRepresentable {
                 tracingHUD?.removeFromSuperview()
                 tracingHUD = nil
                 panGesture?.isEnabled = false
+                tapGesture?.isEnabled = true
                 if let scrollView = container as? UIScrollView {
                     scrollView.isScrollEnabled = true
                 }
@@ -370,7 +407,7 @@ struct TrailInteractiveMapView: UIViewRepresentable {
             
             let label = UILabel()
             label.translatesAutoresizingMaskIntoConstraints = false
-            label.text = "🎨 DISEGNA IL SENTIERO SULLA MAPPA"
+            label.text = "🎨 TRACCIA IL PERCORSO TRA I PUNTI EVIDENZIATI IN GIALLO"
             label.textColor = .white
             label.font = .systemFont(ofSize: 14, weight: .bold)
             
@@ -388,6 +425,7 @@ struct TrailInteractiveMapView: UIViewRepresentable {
         // MARK: - UIDragInteractionDelegate
         
         func dragInteraction(_ interaction: UIDragInteraction, itemsForBeginning session: UIDragSession) -> [UIDragItem] {
+            guard !parent.isTracingMode else { return [] }
             guard let view = interaction.view, let idString = view.accessibilityIdentifier else { return [] }
             let provider = NSItemProvider(object: idString as NSString)
             let item = UIDragItem(itemProvider: provider)
@@ -434,52 +472,96 @@ final class TrailPOIMarkerView: UIView {
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
 
+        let markerHeight = markerDiameter * 1.34
         let circleCenterX = rect.midX
-        let circleCenterY = markerDiameter / 2
-        let radius = markerDiameter / 2
+        let radius = markerDiameter * 0.43
+        let circleCenterY = radius + markerDiameter * 0.07
+        let tip = CGPoint(x: circleCenterX, y: markerHeight)
 
         if isSelected {
             let selectionPadding = 5 / zoomScale
-            ctx.setStrokeColor(UIColor.systemYellow.cgColor)
-            ctx.setLineWidth(3.0 / zoomScale)
+            ctx.setStrokeColor(UIColor(Color("WWFGreen")).withAlphaComponent(0.72).cgColor)
+            ctx.setLineWidth(2.5 / zoomScale)
             ctx.addArc(center: CGPoint(x: circleCenterX, y: circleCenterY), radius: radius + selectionPadding, startAngle: 0, endAngle: .pi * 2, clockwise: false)
             ctx.strokePath()
+
+            ctx.setFillColor(UIColor(Color("WWFGreen")).withAlphaComponent(0.12).cgColor)
+            ctx.addArc(center: CGPoint(x: circleCenterX, y: circleCenterY), radius: radius + selectionPadding * 1.8, startAngle: 0, endAngle: .pi * 2, clockwise: false)
+            ctx.fillPath()
         }
 
-        ctx.setShadow(offset: CGSize(width: 0, height: 2 / zoomScale), blur: 4 / zoomScale, color: UIColor.black.withAlphaComponent(0.4).cgColor)
-        let fillColor = UIColor(poi.type.color)
+        ctx.setShadow(offset: CGSize(width: 0, height: 2.5 / zoomScale), blur: 5 / zoomScale, color: UIColor.black.withAlphaComponent(0.24).cgColor)
+        let fillColor = isSelected ? UIColor(Color("WWFGreen")) : UIColor(poi.type.color).withAlphaComponent(0.86)
         ctx.setFillColor(fillColor.cgColor)
-        ctx.addArc(center: CGPoint(x: circleCenterX, y: circleCenterY), radius: radius, startAngle: 0, endAngle: .pi * 2, clockwise: false)
-        ctx.fillPath()
+
+        let pinPath = UIBezierPath()
+        pinPath.move(to: CGPoint(x: circleCenterX - radius, y: circleCenterY))
+        pinPath.addCurve(
+            to: CGPoint(x: circleCenterX, y: circleCenterY - radius),
+            controlPoint1: CGPoint(x: circleCenterX - radius, y: circleCenterY - radius * 0.56),
+            controlPoint2: CGPoint(x: circleCenterX - radius * 0.56, y: circleCenterY - radius)
+        )
+        pinPath.addCurve(
+            to: CGPoint(x: circleCenterX + radius, y: circleCenterY),
+            controlPoint1: CGPoint(x: circleCenterX + radius * 0.56, y: circleCenterY - radius),
+            controlPoint2: CGPoint(x: circleCenterX + radius, y: circleCenterY - radius * 0.56)
+        )
+        pinPath.addCurve(
+            to: CGPoint(x: circleCenterX + radius * 0.58, y: circleCenterY + radius * 0.78),
+            controlPoint1: CGPoint(x: circleCenterX + radius, y: circleCenterY + radius * 0.36),
+            controlPoint2: CGPoint(x: circleCenterX + radius * 0.82, y: circleCenterY + radius * 0.62)
+        )
+        pinPath.addCurve(
+            to: tip,
+            controlPoint1: CGPoint(x: circleCenterX + radius * 0.42, y: markerHeight * 0.72),
+            controlPoint2: CGPoint(x: circleCenterX + radius * 0.16, y: markerHeight * 0.88)
+        )
+        pinPath.addCurve(
+            to: CGPoint(x: circleCenterX - radius * 0.58, y: circleCenterY + radius * 0.78),
+            controlPoint1: CGPoint(x: circleCenterX - radius * 0.16, y: markerHeight * 0.88),
+            controlPoint2: CGPoint(x: circleCenterX - radius * 0.42, y: markerHeight * 0.72)
+        )
+        pinPath.addCurve(
+            to: CGPoint(x: circleCenterX - radius, y: circleCenterY),
+            controlPoint1: CGPoint(x: circleCenterX - radius * 0.82, y: circleCenterY + radius * 0.62),
+            controlPoint2: CGPoint(x: circleCenterX - radius, y: circleCenterY + radius * 0.36)
+        )
+        pinPath.close()
+        pinPath.fill()
         ctx.setShadow(offset: .zero, blur: 0, color: nil)
 
-        ctx.setStrokeColor(UIColor.white.withAlphaComponent(0.4).cgColor)
-        ctx.setLineWidth(1 / zoomScale)
-        ctx.addArc(center: CGPoint(x: circleCenterX, y: circleCenterY), radius: radius - 0.5 / zoomScale, startAngle: 0, endAngle: .pi * 2, clockwise: false)
-        ctx.strokePath()
+        ctx.setStrokeColor(UIColor.white.withAlphaComponent(0.72).cgColor)
+        ctx.setLineWidth(1.4 / zoomScale)
+        pinPath.stroke()
+
+        let medallionRadius = radius * 0.58
+        ctx.setFillColor(UIColor(red: 1.0, green: 0.992, blue: 0.965, alpha: 1).cgColor)
+        ctx.addArc(center: CGPoint(x: circleCenterX, y: circleCenterY), radius: medallionRadius, startAngle: 0, endAngle: .pi * 2, clockwise: false)
+        ctx.fillPath()
+
+        let iconPtSize = max(8, (targetScreenDiameter * 0.35) / zoomScale)
+        let config = UIImage.SymbolConfiguration(pointSize: iconPtSize, weight: .semibold)
+        if let icon = UIImage(systemName: poi.type.icon, withConfiguration: config)?.withTintColor(UIColor(red: 0.102, green: 0.200, blue: 0.126, alpha: 1), renderingMode: .alwaysOriginal) {
+            let iconSize = icon.size
+            let iconOrigin = CGPoint(x: circleCenterX - iconSize.width / 2, y: circleCenterY - iconSize.height / 2)
+            icon.draw(in: CGRect(origin: iconOrigin, size: iconSize))
+        }
 
         // Number badge if it's a step
         if let idx = stepIndex {
             let badgeRadius = radius * 0.45
             let badgeCenter = CGPoint(x: circleCenterX + radius * 0.7, y: circleCenterY - radius * 0.7)
-            ctx.setFillColor(UIColor.systemBlue.cgColor)
+            ctx.setShadow(offset: CGSize(width: 0, height: 1 / zoomScale), blur: 2 / zoomScale, color: UIColor.black.withAlphaComponent(0.22).cgColor)
+            ctx.setFillColor(UIColor(red: 0.102, green: 0.200, blue: 0.126, alpha: 1).cgColor)
             ctx.addArc(center: badgeCenter, radius: badgeRadius, startAngle: 0, endAngle: .pi*2, clockwise: false)
             ctx.fillPath()
+            ctx.setShadow(offset: .zero, blur: 0, color: nil)
             
             let font = UIFont.systemFont(ofSize: 12 / zoomScale, weight: .bold)
             let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
             let str = "\(idx + 1)" as NSString
             let size = str.size(withAttributes: attrs)
             str.draw(at: CGPoint(x: badgeCenter.x - size.width/2, y: badgeCenter.y - size.height/2), withAttributes: attrs)
-        } else {
-            // Icon if not a step (or both, but icon is small)
-            let iconPtSize = max(8, (targetScreenDiameter * 0.35) / zoomScale)
-            let config = UIImage.SymbolConfiguration(pointSize: iconPtSize, weight: .semibold)
-            if let icon = UIImage(systemName: poi.type.icon, withConfiguration: config)?.withTintColor(.white, renderingMode: .alwaysOriginal) {
-                let iconSize = icon.size
-                let iconOrigin = CGPoint(x: circleCenterX - iconSize.width / 2, y: circleCenterY - iconSize.height / 2)
-                icon.draw(in: CGRect(origin: iconOrigin, size: iconSize))
-            }
         }
 
         let labelFontSize = targetLabelFontSize / zoomScale
@@ -488,7 +570,7 @@ final class TrailPOIMarkerView: UIView {
         let labelGap = 4 / zoomScale
 
         let font = UIFont.systemFont(ofSize: labelFontSize, weight: .semibold)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.white]
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(red: 0.102, green: 0.200, blue: 0.126, alpha: 1)]
         let label = poi.name as NSString
 
         let maxLabelWidth = rect.width - paddingH * 2
@@ -498,13 +580,16 @@ final class TrailPOIMarkerView: UIView {
         let bgWidth = labelSize.width + paddingH * 2
         let bgHeight = labelSize.height + paddingV * 2
         let bgX = circleCenterX - bgWidth / 2
-        let bgY = circleCenterY + radius + labelGap
+        let bgY = markerHeight + labelGap
 
         let bgRect = CGRect(x: bgX, y: bgY, width: bgWidth, height: bgHeight)
         let bgPath = UIBezierPath(roundedRect: bgRect, cornerRadius: bgRect.height / 2)
 
-        UIColor.black.withAlphaComponent(0.72).setFill()
+        UIColor(red: 1.0, green: 0.992, blue: 0.965, alpha: 0.92).setFill()
         bgPath.fill()
+        UIColor(Color("WWFGreen")).withAlphaComponent(0.28).setStroke()
+        bgPath.lineWidth = 1 / zoomScale
+        bgPath.stroke()
 
         let textRect = CGRect(x: bgRect.origin.x + paddingH, y: bgRect.origin.y + paddingV, width: labelSize.width, height: labelSize.height)
         label.draw(with: textRect, options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin], attributes: attrs, context: nil)
@@ -512,7 +597,7 @@ final class TrailPOIMarkerView: UIView {
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         let hitRadius = (markerDiameter / 2) + 12
-        let center = CGPoint(x: bounds.midX, y: markerDiameter / 2)
+        let center = CGPoint(x: bounds.midX, y: markerDiameter * 0.5)
         let dx = point.x - center.x
         let dy = point.y - center.y
         return (dx * dx + dy * dy) <= (hitRadius * hitRadius)

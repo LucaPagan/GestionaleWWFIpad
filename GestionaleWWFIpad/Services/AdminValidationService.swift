@@ -22,7 +22,7 @@ nonisolated struct BundleReadiness: Equatable {
     let generationStatus: String?
 
     var isUsable: Bool {
-        isReady &&
+        return isReady &&
         generationStatus == "ready" &&
         manifestSHA256?.isEmpty == false &&
         sizeBytes > 0

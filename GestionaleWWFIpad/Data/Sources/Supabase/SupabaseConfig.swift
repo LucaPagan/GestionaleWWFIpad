@@ -336,8 +336,8 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         let (data, httpResponse) = try await performRequestWithRetry(request)
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw SupabaseError.apiError("RPC \(functionName) failed (\(httpResponse.statusCode)): \(errorBody)")
+            let errorBody = extractUserFriendlyError(from: data, fallback: String(data: data, encoding: .utf8) ?? "Unknown error")
+            throw SupabaseError.apiError(errorBody)
         }
 
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -364,8 +364,8 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         let (data, httpResponse) = try await performRequestWithRetry(request)
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw SupabaseError.apiError("Edge Function \(functionName) failed (\(httpResponse.statusCode)): \(errorBody)")
+            let errorBody = extractUserFriendlyError(from: data, fallback: String(data: data, encoding: .utf8) ?? "Unknown error")
+            throw SupabaseError.apiError(errorBody)
         }
 
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -419,8 +419,8 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         let (data, httpResponse) = try await performRequestWithRetry(request)
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw SupabaseError.apiError("Insert into \(table) failed (\(httpResponse.statusCode)): \(errorBody)")
+            let errorBody = extractUserFriendlyError(from: data, fallback: String(data: data, encoding: .utf8) ?? "Unknown error")
+            throw SupabaseError.apiError(errorBody)
         }
 
         return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]])?.first
@@ -448,16 +448,17 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         let (data, httpResponse) = try await performRequestWithRetry(request)
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw SupabaseError.apiError("Upsert into \(table) failed (\(httpResponse.statusCode)): \(errorBody)")
+            let errorBody = extractUserFriendlyError(from: data, fallback: String(data: data, encoding: .utf8) ?? "Unknown error")
+            throw SupabaseError.apiError(errorBody)
         }
 
         return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]])?.first
     }
 
     func patch(table: String, id: String, values: [String: Any?]) async throws {
-        let urlString = "\(projectURL)/rest/v1/\(table)?id=eq.\(id)"
-        guard let url = URL(string: urlString) else {
+        guard let url = restURL(table: table, queryItems: [
+            URLQueryItem(name: "id", value: "eq.\(id)")
+        ]) else {
             throw SupabaseError.networkError("Invalid URL")
         }
 
@@ -482,13 +483,8 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
     }
     
     func delete(from table: String, match: [String: String]) async throws {
-        var queryItems = [String]()
-        for (key, value) in match {
-            queryItems.append("\(key)=eq.\(value)")
-        }
-        let queryString = queryItems.joined(separator: "&")
-        let urlString = "\(projectURL)/rest/v1/\(table)?\(queryString)"
-        guard let url = URL(string: urlString) else {
+        let queryItems = match.map { URLQueryItem(name: $0.key, value: "eq.\($0.value)") }
+        guard let url = restURL(table: table, queryItems: queryItems) else {
             throw SupabaseError.networkError("Invalid URL")
         }
 
@@ -508,6 +504,14 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         guard (200...299).contains(httpResponse.statusCode) else {
             throw SupabaseError.apiError("Delete from \(table) failed (\(httpResponse.statusCode))")
         }
+    }
+
+    private func restURL(table: String, queryItems: [URLQueryItem]) -> URL? {
+        guard var components = URLComponents(string: "\(projectURL)/rest/v1/\(table)") else {
+            return nil
+        }
+        components.queryItems = queryItems
+        return components.url
     }
     
     func uploadFile(bucket: String, path: String, data: Data, contentType: String = "image/jpeg") async throws -> String {
@@ -562,14 +566,62 @@ final class SupabaseConfig: NetworkClient, @unchecked Sendable {
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let errorBody = String(data: responseData, encoding: .utf8) ?? ""
-            throw SupabaseError.storageError("Upload failed (\(httpResponse.statusCode)): \(errorBody)")
+            let errorBody = extractUserFriendlyError(from: responseData, fallback: String(data: responseData, encoding: .utf8) ?? "Unknown error")
+            throw SupabaseError.storageError(errorBody)
         }
 
-        let publicURL = "\(projectURL)/storage/v1/object/public/\(bucket)/\(path)"
-        return publicURL
+        return Self.storageReference(bucket: bucket, path: path)
     }
 
+    static func storageReference(bucket: String, path: String) -> String {
+        "\(bucket)/\(path)"
+    }
+
+    func publicStorageURL(for reference: String) -> URL? {
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let url = URL(string: trimmed), url.scheme != nil {
+            if trimmed.contains("/storage/v1/object/"),
+               !trimmed.contains("/object/public/"),
+               !trimmed.contains("/object/authenticated/") {
+                return URL(string: trimmed.replacingOccurrences(of: "/object/", with: "/object/public/"))
+            }
+            return url
+        }
+
+        return URL(string: "\(projectURL)/storage/v1/object/public/\(trimmed)")
+    }
+
+
+    private func extractUserFriendlyError(from data: Data, fallback: String) -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = json["message"] as? String else {
+            return fallback
+        }
+        
+        // Translate common Supabase database messages into Italian for the manager
+        if message.contains("bundle light is missing") || message.contains("not ready") {
+            return "Impossibile pubblicare il percorso: i pacchetti dati (bundle) per l'uso offline non sono ancora pronti o sono obsoleti. Salva prima come bozza e attendi la generazione."
+        }
+        if message.contains("duplicate key value") {
+            return "Un elemento con questo nome o codice esiste già nel sistema."
+        }
+        if message.contains("row-level security policy") {
+            return "Non posso caricare questo file nello storage. Verifica di aver effettuato l'accesso come manager autorizzato e riprova. Se il problema continua, i permessi del bucket non consentono ancora il caricamento."
+        }
+        if message.localizedCaseInsensitiveContains("payload too large") || message.localizedCaseInsensitiveContains("file size") {
+            return "Il file selezionato è troppo grande per il caricamento. Prova con un modello 3D più leggero o ottimizzato."
+        }
+        if message.localizedCaseInsensitiveContains("mime") || message.localizedCaseInsensitiveContains("content type") {
+            return "Il file selezionato non è in un formato accettato. Per la Realtà Aumentata scegli un modello con estensione .usdz."
+        }
+        if message.contains("foreign key constraint") {
+            return "Impossibile completare l'operazione perché questo elemento è collegato ad altri dati (es. percorsi o eventi attivi)."
+        }
+        
+        return message // Return the parsed English message if no translation exists
+    }
 }
 
 
@@ -593,7 +645,7 @@ enum SupabaseError: LocalizedError {
         switch self {
         case .networkError(let msg): return "Errore di rete: \(msg)"
         case .authError(let msg):    return "Errore autenticazione: \(msg)"
-        case .apiError(let msg):     return "Errore API: \(msg)"
+        case .apiError(let msg):     return msg
         case .storageError(let msg): return "Errore storage: \(msg)"
         }
     }

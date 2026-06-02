@@ -29,7 +29,7 @@ struct ManagerRootView: View {
 
             EventBuilderListView()
                 .tabItem {
-                    Label("Eventi", systemImage: "calendar.badge.clock")
+                    Label("Eventi", systemImage: "calendar")
                 }
                 .tag(2)
 
